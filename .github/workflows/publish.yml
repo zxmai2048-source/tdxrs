@@ -23,6 +23,9 @@ jobs:
         with:
           target: ${{ matrix.target }}
           args: --release --out dist
+      - name: Build sdist (only x86_64)
+        if: matrix.target == 'x86_64'
+        run: pip install maturin && maturin sdist --out dist
       - name: Upload to PyPI
         run: pip install twine && twine upload --skip-existing dist/*
         env:
