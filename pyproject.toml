@@ -1,0 +1,28 @@
+[build-system]
+requires = ["maturin>=1.5,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "tdxrs"
+version = "0.5.0"
+description = "TDX (通达信) market data parser — Rust implementation with Python bindings"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+# Core logic is in the compiled Rust extension (.pyd/.so), no pure-Python deps
+dependencies = []
+authors = [
+    {name = "Chiang Tao", email = "chiangtao_fan@hotmail.com"}
+]
+
+[project.optional-dependencies]
+pandas = ["pandas>=1.0"]   # for *_dataframe() methods
+dev = ["pytest", "pandas>=1.0"]
+
+[project.urls]
+repository = "https://github.com/jiangtaovan/tdxrs"
+
+# === maturin config ===
+[tool.maturin]
+features = ["pyo3/extension-module"]
+python-source = "python"              # Python package scaffolding (__init__.py etc.)
+module-name = "tdxrs._internal"       # Native extension loaded as tdxrs._internal

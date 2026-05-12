@@ -1,0 +1,53 @@
+"""tdxrs 协议常量
+
+用法:
+    from tdxrs.constants import MARKET_SH, KLINE_DAILY, FQ_QFQ
+"""
+
+from tdxrs._internal import (  # noqa: F401
+    # 市场代码
+    MARKET_SZ,
+    MARKET_SH,
+    MARKET_BJ,
+    # K线种类
+    KLINE_5MIN,
+    KLINE_15MIN,
+    KLINE_30MIN,
+    KLINE_1HOUR,
+    KLINE_DAILY,
+    KLINE_WEEKLY,
+    KLINE_MONTHLY,
+    KLINE_EXHQ_1MIN,
+    KLINE_1MIN,
+    KLINE_RI_K,
+    KLINE_3MONTH,
+    KLINE_YEARLY,
+    # 复权类型
+    FQ_NONE,
+    FQ_QFQ,
+    FQ_HFQ,
+    # 限制
+    MAX_KLINE_COUNT,
+    MAX_TRANSACTION_COUNT,
+    # 默认配置
+    DEFAULT_PORT,
+    DEFAULT_POOL_SIZE,
+    FQ_PRICE_PRECISION,
+    # 板块文件
+    BLOCK_SZ,
+    BLOCK_FG,
+    BLOCK_GN,
+    BLOCK_DEFAULT,
+)
+
+__all__ = [
+    "MARKET_SZ", "MARKET_SH", "MARKET_BJ",
+    "KLINE_5MIN", "KLINE_15MIN", "KLINE_30MIN", "KLINE_1HOUR",
+    "KLINE_DAILY", "KLINE_WEEKLY", "KLINE_MONTHLY",
+    "KLINE_EXHQ_1MIN", "KLINE_1MIN", "KLINE_RI_K",
+    "KLINE_3MONTH", "KLINE_YEARLY",
+    "FQ_NONE", "FQ_QFQ", "FQ_HFQ",
+    "MAX_KLINE_COUNT", "MAX_TRANSACTION_COUNT",
+    "DEFAULT_PORT", "DEFAULT_POOL_SIZE", "FQ_PRICE_PRECISION",
+    "BLOCK_SZ", "BLOCK_FG", "BLOCK_GN", "BLOCK_DEFAULT",
+]
