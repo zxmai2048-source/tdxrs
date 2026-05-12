@@ -43,3 +43,17 @@ repository = "https://github.com/jiangtaovan/tdxrs"
 features = ["pyo3/extension-module"]
 python-source = "python"              # Python package scaffolding (__init__.py etc.)
 module-name = "tdxrs._internal"       # Native extension loaded as tdxrs._internal
+# 排除不需要发布到 PyPI 的目录 (测试数据/bench/示例/临时文档)
+exclude = [
+    "tests/**",
+    "benches/**",
+    "examples/**",
+    "docs/**",
+    "tools/**",
+    "assets/**",
+    ".github/**",
+    "todo.md",
+    "CLAUDE.md",
+    "Dockerfile",
+    ".dockerignore",
+]
