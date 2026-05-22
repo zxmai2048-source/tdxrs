@@ -61,10 +61,18 @@ from tdxrs import MinBarReader, LcMinBarReader
 
 | Reader | 格式 | 适用 |
 |--------|------|------|
-| `MinBarReader` | 整数价格 (×1000) | 常规 5 分钟线 |
-| `LcMinBarReader` | 浮点价格 | LC 格式分钟线 |
+| MinBarReader | 整数价格 (×1000) | 常规 5 分钟线 |
+| LcMinBarReader | 浮点价格 | LC 格式分钟线 |
 
-方法签名同 `DailyBarReader`，额外返回 `hour`, `minute` 字段。
+| 方法 | 返回 | 说明 |
+|------|------|------|
+| `parse_data(data: bytes)` | `list[dict]` | 解析分钟线二进制数据 |
+| `parse_file(path: str)` | `list[dict]` | 从文件读取并解析 |
+| `parse_data_tuples(data: bytes)` | `list[tuple]` | 高性能 tuple 模式 |
+| `parse_file_tuples(path: str)` | `list[tuple]` | 文件 → tuple |
+| `to_dataframe(data: bytes)` | `DataFrame` | → pandas DataFrame |
+
+返回额外字段: `hour`, `minute`
 
 ### BlockReader
 
@@ -75,11 +83,11 @@ from tdxrs import BlockReader
 reader = BlockReader()
 ```
 
-| 方法 | 说明 |
-|------|------|
-| `parse_data(data: bytes)` | 扁平模式 (每只股票一行) |
-| `parse_data_group(data: bytes)` | 分组模式 (每板块一行) |
-| `parse_file(path: str)` | 文件读取 |
+| 方法 | 返回 | 说明 |
+|------|------|------|
+| `parse_data(data: bytes)` | `list[dict]` | 扁平模式 (每只股票一行) |
+| `parse_data_group(data: bytes)` | `list[dict]` | 分组模式 (每板块一行) |
+| `parse_file(path: str)` | `list[dict]` | 从文件读取并解析 |
 
 ### FinancialReader
 
@@ -89,6 +97,11 @@ reader = BlockReader()
 from tdxrs import FinancialReader
 reader = FinancialReader()
 ```
+
+| 方法 | 返回 | 说明 |
+|------|------|------|
+| `parse_data(data: bytes)` | `list[dict]` | 解析 gpcw 二进制财务数据 |
+| `parse_file(path: str)` | `list[dict]` | 从文件读取并解析 |
 
 返回: `[{"code": str, "report_date": int, "fields": [float, ...]}, ...]`
 
@@ -205,12 +218,12 @@ more = client.get_security_bars(KLINE_DAILY, MARKET_SH, "600519", start=800, cou
 | 1 | `KLINE_15MIN` | 15 分钟线 | ✅ | — |
 | 2 | `KLINE_30MIN` | 30 分钟线 | ✅ | — |
 | 3 | `KLINE_1HOUR` | 60 分钟线 | ✅ | — |
-| 4 | `KLINE_DAILY` | 日 K 线 (完整) | ✅ | **推荐用于日线** |
+| 4 | `KLINE_DAILY` | 日 K 线 (完整) | ✅ | **推荐用于日线**。vol=股数 |
 | 5 | `KLINE_WEEKLY` | 周 K 线 | ✅ | — |
 | 6 | `KLINE_MONTHLY` | 月 K 线 | ✅ | — |
 | 7 | `KLINE_EXHQ_1MIN` | 扩展 1 分钟线 | ✅ | — |
 | 8 | `KLINE_1MIN` | 1 分钟线 | ✅ | — |
-| 9 | `KLINE_RI_K` | 日 K 线 (精简) | ❌ | 不支持 fq=0，仅 fq=1 或 fq=2 |
+| 9 | `KLINE_RI_K` | 日 K 线 (精简) | ❌ | 不支持 fq=0。vol=**手数** (÷100)。含分钟字段 |
 | 10 | `KLINE_3MONTH` | 季 K 线 | ✅ | — |
 | 11 | `KLINE_YEARLY` | 年 K 线 | ✅ | — |
 
@@ -247,7 +260,7 @@ hfq = client.get_security_bars(4, 1, "600519", 0, 100, fq=2)
 | `close` | float | 收盘价 |
 | `high` | float | 最高价 |
 | `low` | float | 最低价 |
-| `vol` | float | 成交量 (手) |
+| `vol` | float | 成交量 (股数, category=9 时为手数) |
 | `amount` | float | 成交额 (元) |
 | `year` | int | 年份 |
 | `month` | int | 月份 |
@@ -260,7 +273,7 @@ hfq = client.get_security_bars(4, 1, "600519", 0, 100, fq=2)
 
 **DataFrame 列名**: `open`, `close`, `high`, `low`, `vol`, `amount`, `year`, `month`, `day`, `hour`, `minute`, `datetime`
 
-**指数 K 线 (IndexBar)**: 在 SecurityBar 基础上增加:
+**指数 K 线 (IndexBar)**: 在 SecurityBar 基础上增加 (vol 单位同样分 cat=4 股数 / cat=9 手数):
 
 | 字段 (dict key) | 类型 | 说明 |
 |------|:--:|------|

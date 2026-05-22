@@ -1,36 +1,27 @@
 # 变更日志
 
-## v0.5.1 (2026-05-12)
-
-### 修复
-- **财务单位修正** — `get_finance_info` 移除所有 `×10000` 自动转换，返回 TDX 原始值。不同字段单位可能不同（万元/千元/元/户），由用户自行判断。旧版本值被错误放大了 10000 倍。
+## v0.5.0 (2026-05-13) — 首次 PyPI 发布
 
 ### 新增
-- **命名财务指标** — `TdxFinanceClient.get_finance_indicators()` 从 gpcw 数据中提取 45 个核心指标（英文 key，原始值）
-- **财务字段映射模块** — `src/protocol/finance_fields.rs`，含 gpcw 索引→(英文名, 中文名) 映射
-- **财务演示程序** — `examples/demo_finance.py`，覆盖实时/批量/DataFrame/本地 gpcw/gpcw 下载
+- **TdxFinanceClient** — 独立财务客户端，分片下载 + 磁盘缓存 (24h TTL)
+- **命名财务指标** — `get_finance_indicators()` 从 gpcw 提取 45 个核心指标（英文 key，原始值）
+- **财务字段映射** — `src/protocol/finance_fields.rs`
+- **轻量日志** — `logd!/logi!/logw!/loge!` 宏，`TDXRS_LOG` 环境变量控制级别
+- **Net/Utils** — 提取三客户端共享逻辑，消除 ~360 行重复代码
+- **连接池磁盘缓存** — TdxFinanceClient 24h 本地缓存 gpcw 文件
+- **CI/CD** — GitHub Actions 多平台构建 (Linux/macOS/Windows) → PyPI 自动发布
+- **文档** — 12 篇维护文档 + 3 个 demo 程序
 
 ### 变更
-- `API_REFERENCE.md` 财务部分标注原始值及典型数量级
-- `parse_finance_info` 测试断言更新 (100000.0 → 10.0)
-
----
-
-## v0.5.0 (2026-05-11)
-
-### 新增
-- **TdxFinanceClient** — 独立财务客户端，大文件分片下载、gpcw 数据解析
-- **轻量日志模块** — `logd!/logi!/logw!/loge!` 宏，`TDXRS_LOG` 环境变量控制级别
-- **Net/Utils 公共模块** — 提取三客户端共享逻辑，消除 ~200+ 行重复代码
-
-### 变更
-- `client.rs` 精简 ~140 行，移除重复工具方法
-- `direct_client.rs` 精简 ~140 行
-- `async_client.rs` 精简 ~80 行
-- `perform_handshake` 从 `client.rs` 移至 `utils.rs` (API 兼容，内部重构)
+- `client.rs` / `direct_client.rs` / `async_client.rs` 精简去重
+- `perform_handshake` 移至 `utils.rs`
 
 ### 修复
-- 财务 `parse_finance_info` 实现，34 字段解析 (v0.5.1 已修正单位)
+- **财务单位** — `get_finance_info` 移除所有 `×10000` 自动转换，返回 TDX 原始值
+- **指数 K 线 fq** — 客户端强制 `fq=0`，不再透传用户值到服务端
+- **自动分页排序** — `get_xxx_all` 改为 prepend，修复跨页乱序
+- **quotes 边界检查** — `parse_security_quotes` 增加 `pos + 30` 保护
+- 测试断言更新 (93 passed)
 
 ---
 

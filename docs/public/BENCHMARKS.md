@@ -119,7 +119,54 @@ Rust 解析层利用零拷贝和 SIMD 友好的内存布局，本地文件速度
 
 ---
 
-## 5. 复现
+## 5. pip 安装版性能实测
+
+> 测试环境: Windows 11, Python 3.13, `tdxrs==0.5.0` (PyPI wheel)  
+> 测试脚本: `examples/gen_bench_charts.py`
+
+### 5.1 本地文件解析 (Reader)
+
+| 操作 | tdxrs (Rust) | 加速比 | 说明 |
+|------|------------:|:-----:|------|
+| 日线 800 条 | 0.35ms | — | 日线二进制解析 |
+| 分钟线 800 条 | 0.34ms | — | 整数价格格式 |
+| 板块 5 条 | 0.005ms | — | 变长 GBK 编码解析 |
+
+> 未做 vs tdxpy 逐项对比，本地 9-11× 加速比已在 §4 中建立。
+
+### 5.2 网络 K 线 (800 条/次, 多品类)
+
+| K 线类型 | tdxrs (连接池) | 说明 |
+|---------|-------------:|------|
+| 日K (daily) | 290ms | 含复权计算 |
+| 周K (weekly) | 210ms | 数据量较小 |
+| 月K (monthly) | 190ms | 同上 |
+| 5分钟线 | 280ms | 日内高频数据 |
+| 1分钟线 | 260ms | 日内高频数据 |
+
+> 各品类耗时差异主要由响应体大小决定，日 K 和分钟 K 数据量大，周/月 K 数据量小。
+
+### 5.3 性能对比图
+
+运行以下命令 (基于 pip 版 tdxrs, 无需 Rust 源码)：
+
+```bash
+pip install tdxrs matplotlib numpy
+python examples/gen_bench_charts.py
+```
+
+输出 4 张柱状图到 `docs/public/`:
+
+| 文件 | 内容 |
+|------|------|
+| `bench_reader_vs_python.png` | ① 本地解析: tdxrs vs tdxpy |
+| `bench_network_kline_by_cat.png` | ② 网络 K 线: 多品类 800 条对比 |
+| `bench_client_strategy.png` | ③ 网络方案: Pool/Direct/Async |
+| `bench_concurrent_scaling.png` | ④ 高并发扩展比 |
+
+---
+
+## 6. 复现
 
 ```bash
 # === Python 基准 ===
@@ -168,7 +215,7 @@ benches/
 
 ---
 
-## 6. 已知局限
+## 7. 已知局限
 
 1. 顺序请求样本量有限（7 次 API），单次网络波动可能影响个别数据点
 2. 连接池并发退化根因为锁粒度，非架构缺陷
@@ -177,7 +224,7 @@ benches/
 
 ---
 
-## 7. 场景选择速查
+## 8. 场景选择速查
 
 根据实际使用模式，对照选择最合适的客户端：
 

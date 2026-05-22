@@ -46,6 +46,11 @@ localsession
 # PyPI / credentials
 pypi.md
 
+# Personal
+todo.md
+提示词规范.md
+tools/
+
 # ============================================================
 # Test artifacts (auto-generated, reproducible)
 # ============================================================
@@ -65,9 +70,10 @@ docs/WORK_LOG_*.md      # 旧版日志 (新版为 WORK_LOG.md)
 docs/tdxrs_quality_*.md      # 旧版日志 (新版为 WORK_LOG.md)
 
 # ============================================================
-# Example outputs (generated images, not source)
+# Generated images (benchmark charts, regression plots, etc.)
 # ============================================================
 examples/*.png
+docs/public/bench_*.png
 examples/local/
 
 # ============================================================

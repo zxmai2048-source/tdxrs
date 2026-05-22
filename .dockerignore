@@ -1,0 +1,49 @@
+# ============================================================
+# Docker ignore — minimize build context for CI / Linux wheel
+# ============================================================
+
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# Rust build cache
+/target
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+*.egg-info/
+dist/
+build/
+
+# IDE
+.idea/
+.vscode/
+
+# Claude Code
+.claude/
+localsession
+
+# Reference projects
+tdxpy/
+
+# Docs — not needed for build
+docs/dev/
+docs/del/
+docs/WORK_LOG_*.md
+
+# Tests, examples, tools — not needed for wheel
+tests/
+benches/
+examples/
+tools/
+
+# Example outputs
+examples/*.png
+
+# OS
+.DS_Store
+Thumbs.db
