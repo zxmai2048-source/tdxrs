@@ -19,7 +19,7 @@ except ImportError:
         "tdxrs native module not found. Please install with: pip install tdxrs"
     )
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 __all__ = [
     "DailyBarReader", "MinBarReader", "LcMinBarReader", "BlockReader", "FinancialReader",
     "TdxHqClient", "TdxDirectClient",

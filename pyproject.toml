@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "tdxrs"
-version = "0.5.0"
+version = "0.6.0"
 description = "TDX (通达信) market data parser — Rust implementation with Python bindings"
 readme = "README.md"
 requires-python = ">=3.8"
