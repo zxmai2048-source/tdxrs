@@ -166,7 +166,41 @@ python examples/gen_bench_charts.py
 
 ---
 
-## 6. 复现
+## 6. ETF / F10 模块性能
+
+> 测试环境: 180.153.18.170:7709, 2026-06-21
+> 测试脚本: `tests/bench_etf_f10.py`
+
+### ETF 模块 (共享连接池)
+
+| 接口 | 平均耗时 | 返回量 |
+|------|----------|--------|
+| connect_to_any | ~300ms | — |
+| get_etf_list(SH) | ~2.5s | 811 只 (多页) |
+| get_etf_bars(5分钟,10) | ~70ms | 10 条 |
+| get_etf_quotes(1只) | ~70ms | 1 条 |
+| get_etf_quotes(2只) | ~70ms | 2 条 |
+| get_etf_minute_time_data | ~65ms | 240 条 |
+| get_etf_transaction_data(100) | ~65ms | 100 条 |
+| get_etf_xdxr_info | ~70ms | 15 条 |
+| get_etf_finance_info | ~65ms | 7 项 |
+
+### F10 模块 (独立连接, 需 `--features f10` 源码编译)
+
+| 接口 | 平均耗时 | 返回量 |
+|------|----------|--------|
+| get_category | ~435ms | 16 个分类 |
+| get_content(单分类) | ~440ms | 8K-70K 字符 |
+| get_all_data(全量) | ~9.2s | 267K 字符 (16 分类) |
+| parse_f10(单分类) | ~1.2ms | 离线解析 |
+| parse_f10(全量) | ~4.6ms | 267K 字符离线解析 |
+| extract_basic_info | ~0.7ms | 离线提取 |
+
+F10 每次请求独立 TCP 连接+握手 (~400ms)，文本解析极快 (267K 字符仅需 4.6ms)。
+
+---
+
+## 7. 复现
 
 ```bash
 # === Python 基准 ===
@@ -201,6 +235,7 @@ tests/
 ├── bench_utils.py           # 共享: 计时、统计、报告生成
 ├── bench_reader.py          # Reader 文件解析
 ├── bench_network.py         # 网络 API
+├── bench_etf_f10.py         # ETF / F10 模块性能
 ├── bench_optimization.py    # dict vs tuple 模式对比
 ├── bench_performance.py     # tdxrs vs tdxpy 全面对比
 └── compare_tdxpy_tdxrs.py   # 功能兼容性验证
@@ -215,7 +250,7 @@ benches/
 
 ---
 
-## 7. 已知局限
+## 8. 已知局限
 
 1. 顺序请求样本量有限（7 次 API），单次网络波动可能影响个别数据点
 2. 连接池并发退化根因为锁粒度，非架构缺陷
@@ -224,7 +259,7 @@ benches/
 
 ---
 
-## 8. 场景选择速查
+## 9. 场景选择速查
 
 根据实际使用模式，对照选择最合适的客户端：
 
@@ -301,4 +336,35 @@ Flask/FastAPI 后端, QPS < 10, 每请求调用 1-2 次 TDX API
 查询特定股票实时财务 (34 字段)
   → TdxHqClient.get_finance_info()
   单次小请求 (<1KB)，混在行情请求中无影响
+```
+
+### ETF 场景
+
+```
+ETF 量化回测, 需要多只 ETF 的日线数据
+  → TdxHqEtfClient
+  共享连接池，批量获取 ~70ms/次
+  自动 ETF 代码验证，非 ETF 代码报错
+```
+
+```
+ETF 实时监控, 每分钟查询 5 只 ETF 行情
+  → TdxHqEtfClient
+  一次 get_etf_quotes 批量获取 ~70ms
+```
+
+### F10 场景
+
+```
+研究特定公司的基本面: 公司概况 + 财务分析
+  → TdxF10Client
+  get_category → get_content × 2 ≈ 900ms
+  parse_f10 离线解析 ≈ 1ms
+```
+
+```
+批量下载全市场 F10 数据
+  → TdxF10Client (独立连接，不阻塞行情)
+  每只股票 ~9s (16 分类)
+  建议: 分批执行 + 本地缓存
 ```

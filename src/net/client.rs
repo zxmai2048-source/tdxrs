@@ -424,6 +424,27 @@ impl TdxHqClient {
         }
     }
 
+    /// 发送原始包并接收响应 (公共方法，供扩展模块使用)
+    ///
+    /// # 参数
+    /// * `packet` - 原始请求包
+    ///
+    /// # 返回
+    /// 响应体数据
+    ///
+    /// # 示例
+    ///
+    /// ```rust
+    /// let mut client = TdxHqClient::new();
+    /// client.connect()?;
+    ///
+    /// // 发送自定义请求
+    /// let response = client.send_raw_and_recv(&custom_packet)?;
+    /// ```
+    pub fn send_raw_and_recv(&self, packet: &[u8]) -> Result<Vec<u8>> {
+        self.send_and_recv(packet)
+    }
+
     /// 尝试重连
     fn reconnect_if_needed(&self) {
         if self.connected.load(Ordering::SeqCst) {

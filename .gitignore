@@ -21,6 +21,9 @@ build/
 python/tdxrs/_internal.*.pyd
 python/tdxrs/_internal.*.so
 
+# Debug symbols
+*.pdb
+
 # ============================================================
 # Environment
 # ============================================================
@@ -66,6 +69,9 @@ tdxpy/
 # ============================================================
 docs/dev/               # 非正式开发笔记
 docs/del/               # 已弃用文档备份
+docs/demo-F10/          # F10 示例数据 (合规考虑不入库)
+examples/f10/output/    # F10 输出数据 (合规考虑不入库)
+/docs/private/
 docs/WORK_LOG_*.md      # 旧版日志 (新版为 WORK_LOG.md)
 docs/tdxrs_quality_*.md      # 旧版日志 (新版为 WORK_LOG.md)
 
@@ -81,3 +87,5 @@ examples/local/
 # ============================================================
 .DS_Store
 Thumbs.db
+CLAUDE.md
+

@@ -180,8 +180,9 @@ mod tests {
         let records = parse_min_bar(&data).unwrap();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].date, "2024-01-15 09:35");
-        assert!((records[0].open - 10.50).abs() < 1e-10);
-        assert!((records[0].high - 10.80).abs() < 1e-10);
+        // f32 精度约 7 位有效数字，使用 1e-5 容差
+        assert!((records[0].open - 10.50).abs() < 1e-5);
+        assert!((records[0].high - 10.80).abs() < 1e-5);
         assert_eq!(records[0].hour, 9);
         assert_eq!(records[0].minute, 35);
     }
@@ -212,7 +213,8 @@ mod tests {
 
         let records = parse_lc_min_bar(&data).unwrap();
         assert_eq!(records.len(), 1);
-        assert!((records[0].open - 10.50).abs() < 1e-10);
-        assert!((records[0].high - 10.80).abs() < 1e-10);
+        // f32 精度约 7 位有效数字，使用 1e-5 容差
+        assert!((records[0].open - 10.50).abs() < 1e-5);
+        assert!((records[0].high - 10.80).abs() < 1e-5);
     }
 }

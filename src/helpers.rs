@@ -41,6 +41,9 @@ pub fn get_price(data: &[u8], pos: usize) -> (i64, usize) {
 /// 交易量解码 - 对应 Python tdxpy helper.py 中的 get_volume 函数
 #[inline]
 pub fn get_volume(vol: i64) -> f64 {
+    if vol == 0 {
+        return 0.0;
+    }
     let logpoint = (vol >> (8 * 3)) as i64;
 
     let hleax = ((vol >> (8 * 2)) & 0xFF) as i64;

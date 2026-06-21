@@ -1,5 +1,38 @@
 # 变更日志
 
+## v0.6.0 (2026-06-21) — 扩展模块: ETF + F10
+
+### 新增
+- **ETF 模块** (`tdxrs.pro.TdxHqEtfClient`) — ETF 专用行情客户端
+  - K线 (12 周期)、实时行情 (五档)、分时、逐笔、除权除息、财务
+  - ETF 列表自动筛选 (沪市 50/51, 深市 15/16)
+  - ETF 代码验证 + 市场自动识别
+  - 共享连接池，与股票行情相同性能
+- **F10 模块** (`tdxrs.pro.TdxF10Client`) — F10 公司资料客户端 (源码编译, `--features f10`)
+  - 16 分类数据获取 (公司概况/财务分析/股东研究等)
+  - 独立 TCP 连接，不影响行情数据
+  - Rust 内置 F10 文本解析器 (267K 字符 4.6ms)
+  - 结构化提取: basic_info (15 字段) + listing_info (8 字段)
+  - GBK 原始字节保留，避免编码损耗
+  - ⚠️ 因数据合规考虑，未包含在 pip 包中，需从源码编译启用
+- **模块分层** — `tdxrs` (核心) + `tdxrs.pro` (扩展)
+- **共享工具** — `net/utils.rs` 新增 `auto_market`, `encode_gbk`, `encode_gbk_padded`
+- **性能测试** — `tests/bench_etf_f10.py`
+
+### 变更
+- `profile/constants.rs` 移除重复的 `MARKET_SZ`/`MARKET_SH` (复用 `protocol::constants`)
+- `etf/constants.rs` 移除重复常量，`is_sh_etf`/`is_sz_etf` 改为私有
+- `etf/utils.rs` 移除死代码 (未使用的 `EtfError` 变体和工具函数)
+- `profile/parser_f10.rs` 移除调试输出 (`eprintln!`)、`F10Parsed.raw` 字段、重复键
+- `profile/types.rs` `F10Category` 新增 `filename_raw` 字段
+
+### 文档
+- 新增 [ETF 模块文档](ETF.md)
+- 新增 [F10 模块文档](F10.md)
+- 更新 README: 新增 PyPI/Stars 徽章、Star History、扩展模块介绍
+
+---
+
 ## v0.5.0 (2026-05-13) — 首次 PyPI 发布
 
 ### 新增

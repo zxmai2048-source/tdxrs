@@ -3,6 +3,7 @@ pub mod async_connection;
 pub mod client;
 pub mod connection;
 pub mod direct_client;
+pub mod f10_client;
 pub mod finance_client;
 pub mod packet;
 pub mod pool;

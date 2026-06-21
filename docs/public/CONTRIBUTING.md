@@ -50,21 +50,36 @@ src/
 │   ├── parsers.rs     # 11 个响应解析器
 │   ├── adjuster.rs    # 复权调整算法
 │   ├── types.rs       # 数据结构定义
-│   └── constants.rs   # 协议常量 (命令码/市场代码等)
+│   ├── constants.rs   # 协议常量 (命令码/市场代码等)
+│   └── finance_fields.rs # gpcw 字段映射
 ├── net/           # 网络客户端
 │   ├── client.rs         # TdxHqClient (连接池+心跳+重试)
 │   ├── direct_client.rs  # TdxDirectClient (裸连接)
 │   ├── finance_client.rs # TdxFinanceClient (独立财务)
+│   ├── f10_client.rs     # TdxF10Client (独立连接)
 │   ├── async_client.rs   # AsyncTdxHqClient (tokio)
-│   ├── utils.rs          # 公共工具 (packet构建/握手/解压)
+│   ├── utils.rs          # 公共工具 (握手/解压/auto_market/encode_gbk)
 │   ├── pool.rs           # 连接池
 │   ├── connection.rs     # 同步 TCP
 │   ├── async_connection.rs # 异步 TCP
 │   └── packet.rs         # 响应头解析
+├── etf/           # ETF 扩展模块
+│   ├── client.rs         # TdxHqEtfClient (封装 TdxHqClient)
+│   ├── constants.rs      # ETF 常量 (代码前缀, 复用 protocol 市场代码)
+│   ├── types.rs          # ETF 数据类型
+│   └── utils.rs          # ETF 代码验证
+├── profile/       # F10 扩展模块 (需 --features f10)
+│   ├── client.rs         # ProfileClient (共享连接池变体)
+│   ├── constants.rs      # 协议常量、分类名称
+│   ├── types.rs          # F10 数据类型
+│   ├── parser.rs         # 二进制响应解析器
+│   └── parser_f10.rs     # F10 文本解析器 (结构化提取)
 ├── python/        # PyO3 Python 绑定
 │   ├── py_client.rs      # TdxHqClient 绑定
 │   ├── py_direct_client.rs # TdxDirectClient 绑定
 │   ├── py_reader.rs      # Reader 绑定
+│   ├── py_etf.rs         # TdxHqEtfClient 绑定
+│   ├── py_profile.rs     # TdxF10Client 绑定
 │   ├── py_dataframe.rs   # DataFrame 构建
 │   └── py_constants.rs   # 常量注册
 ├── logging.rs     # 轻量日志 (TDXRS_LOG 控制)

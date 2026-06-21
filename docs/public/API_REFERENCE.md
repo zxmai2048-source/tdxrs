@@ -2,7 +2,7 @@
 
 > 本文档覆盖 Python 公开 API。Rust 侧 API 请参见源码文档注释。
 >
-> 版本: v0.5.0 | 更新日期: 2026-05-11
+> 版本: v0.5.0 | 更新日期: 2026-06-21
 
 ---
 
@@ -18,6 +18,8 @@
 | 财务 / 除权 / 板块 | [TdxHqClient — 财务与除权](#数据获取--财务与除权) |
 | 连接池 / 服务器管理 | [TdxHqClient — 连接管理](#连接管理) |
 | 裸连接方案 | [TdxDirectClient](#tdxdirectclient) |
+| ETF 数据 | [TdxHqEtfClient](#tdxhqetfclient) |
+| F10 公司资料 | [TdxF10Client](#tdxf10client) |
 | 本地文件 | [Reader 类](#reader-类) |
 | 常量 | [常量子模块](#常量-tdxrsconstants) |
 
@@ -541,6 +543,63 @@ dc = TdxDirectClient("119.147.212.81", 7709, timeout=10.0)
 bars = dc.get_security_bars(KLINE_DAILY, MARKET_SH, "600519", 0, 100, FQ_QFQ)
 dc.set_server("180.153.18.17", 7709)  # 切换服务器
 ```
+
+---
+
+### TdxHqEtfClient
+
+ETF 行情客户端 (扩展模块)。封装 `TdxHqClient`，自动处理 ETF 代码验证。
+
+```python
+from tdxrs.pro import TdxHqEtfClient
+from tdxrs.constants import MARKET_SH
+
+client = TdxHqEtfClient()
+client.connect_to_any()
+```
+
+完整 API 详见 [ETF 模块文档](ETF.md)。
+
+| 方法 | 返回 | 说明 |
+|------|------|------|
+| `get_etf_list(market)` | `list[dict]` | ETF 列表 |
+| `get_etf_bars(cat, mkt, code, start, count)` | `list[dict]` | ETF K线 |
+| `get_etf_bars_all(cat, mkt, code, count)` | `list[dict]` | 自动分页 |
+| `get_etf_quotes(stocks)` | `list[dict]` | 实时行情 (五档) |
+| `get_etf_minute_time_data(mkt, code)` | `list[dict]` | 分时数据 |
+| `get_etf_transaction_data(mkt, code, start, count)` | `list[dict]` | 逐笔成交 |
+| `get_etf_xdxr_info(mkt, code)` | `list[dict]` | 除权除息 |
+| `get_etf_finance_info(mkt, code)` | `dict` | 财务信息 |
+| `is_etf(market, code)` | `bool` | 静态: 判断 ETF |
+| `auto_market_code(code)` | `int` | 静态: 自动市场 |
+
+---
+
+### TdxF10Client
+
+> ⚠️ 源码编译专用 (`--features f10`)，pip 包不包含此模块。
+
+F10 公司资料客户端。独立连接，不占用共享连接池。
+
+```python
+# 需从源码编译: maturin develop --release --features f10
+from tdxrs.pro import TdxF10Client
+
+client = TdxF10Client("180.153.18.170", 7709)
+```
+
+完整 API 详见 [F10 模块文档](F10.md)。
+
+| 方法 | 返回 | 说明 |
+|------|------|------|
+| `get_category(market, code)` | `list[dict]` | 分类列表 |
+| `get_content(market, code, category_dict)` | `str` | 指定分类内容 |
+| `get_all_contents(market, code)` | `dict[str, str]` | 全部内容 |
+| `get_all_data(market, code)` | `dict` | 结构化全量数据 |
+| `parse_f10(text)` | `dict` | 静态: 解析 F10 文本 |
+| `extract_basic_info(text)` | `dict` | 静态: 提取基本资料 |
+| `is_valid_code(code)` | `bool` | 静态: 验证代码 |
+| `auto_market_code(code)` | `int` | 静态: 自动市场 |
 
 ---
 

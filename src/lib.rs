@@ -1,8 +1,10 @@
 pub mod constants;
 pub mod error;
+pub mod etf;
 pub mod helpers;
 pub mod logging;
 pub mod net;
+pub mod profile;
 pub mod protocol;
 pub mod python;
 pub mod reader;
@@ -23,6 +25,11 @@ fn tdxrs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Client classes
     m.add_class::<python::py_client::PyTdxHqClient>()?;
     m.add_class::<python::py_direct_client::PyTdxDirectClient>()?;
+    // ETF client
+    m.add_class::<python::py_etf::PyTdxHqEtfClient>()?;
+    // F10 profile client — 需要 --features f10 启用
+    #[cfg(feature = "f10")]
+    m.add_class::<python::py_profile::PyTdxF10Client>()?;
     // Protocol constants
     python::py_constants::register_constants(m)?;
     Ok(())

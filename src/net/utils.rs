@@ -26,6 +26,56 @@ pub fn code_bytes(code: &str) -> [u8; 6] {
 }
 
 // ================================================================
+// 市场代码自动识别 (F10 / Profile 共享)
+// ================================================================
+
+/// 自动识别市场代码
+///
+/// 根据股票代码首字符判断市场:
+/// - '6' → 上海 (1)
+/// - '0' | '3' → 深圳 (0)
+///
+/// # Errors
+/// 代码长度不为 6 位或首字符无法识别时返回错误。
+pub fn auto_market(code: &str) -> Result<u8> {
+    if code.len() != 6 {
+        return Err(TdxError::InvalidData(format!(
+            "无效的股票代码: {} (必须为 6 位数字)",
+            code
+        )));
+    }
+    match code.chars().next() {
+        Some('6') => Ok(MARKET_SH),
+        Some('0') | Some('3') => Ok(MARKET_SZ),
+        _ => Err(TdxError::InvalidData(format!(
+            "无法自动识别市场代码: {}",
+            code
+        ))),
+    }
+}
+
+// ================================================================
+// GBK 编码 (F10 / Profile 共享)
+// ================================================================
+
+/// 编码字符串为 GBK 字节
+pub fn encode_gbk(s: &str) -> Result<Vec<u8>> {
+    let (encoded, _, _) = encoding_rs::GBK.encode(s);
+    Ok(encoded.into_owned())
+}
+
+/// 编码字符串为 GBK 字节并填充到指定长度
+pub fn encode_gbk_padded(s: &str, target_len: usize) -> Result<Vec<u8>> {
+    let mut bytes = encode_gbk(s)?;
+    if bytes.len() < target_len {
+        bytes.resize(target_len, 0);
+    } else if bytes.len() > target_len {
+        bytes.truncate(target_len);
+    }
+    Ok(bytes)
+}
+
+// ================================================================
 // 请求包构建
 // ================================================================
 
@@ -248,5 +298,33 @@ mod tests {
             4, 0, "000001", &bars, &xdxr,
         );
         assert!(ctx.is_empty());
+    }
+
+    #[test]
+    fn test_auto_market() {
+        assert_eq!(auto_market("600519").unwrap(), MARKET_SH);
+        assert_eq!(auto_market("000858").unwrap(), MARKET_SZ);
+        assert_eq!(auto_market("300750").unwrap(), MARKET_SZ);
+        assert!(auto_market("123456").is_err());
+        assert!(auto_market("abc").is_err());
+        assert!(auto_market("12345").is_err());
+    }
+
+    #[test]
+    fn test_encode_gbk() {
+        let result = encode_gbk("公司概况");
+        assert!(result.is_ok());
+        let bytes = result.unwrap();
+        assert_eq!(bytes.len(), 8); // 4 个中文字符 * 2 字节
+    }
+
+    #[test]
+    fn test_encode_gbk_padded() {
+        let result = encode_gbk_padded("test", 10);
+        assert!(result.is_ok());
+        let bytes = result.unwrap();
+        assert_eq!(bytes.len(), 10);
+        assert_eq!(&bytes[..4], b"test");
+        assert_eq!(&bytes[4..], &[0, 0, 0, 0, 0, 0]);
     }
 }

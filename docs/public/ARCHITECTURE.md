@@ -3,28 +3,30 @@
 ## 模块分层
 
 ```
-┌─────────────────────────────────────────────┐
-│               Python 层                      │
-│  TdxHqClient / TdxDirectClient / Reader     │
-│  → list[dict] / list[tuple] / DataFrame     │
-├─────────────────────────────────────────────┤
-│               PyO3 绑定层                    │
-│  py_client.rs / py_reader.rs /              │
-│  py_direct_client.rs / py_dataframe.rs      │
-├──────────────┬──────────────────────────────┤
-│  net/        │         reader/              │
-│  client.rs   │  daily_bar.rs  (日线)        │
-│  pool.rs     │  min_bar.rs    (分钟线)      │
-│  direct_*.rs │  block.rs      (板块)        │
-│  async_*.rs  │  financial.rs  (财务)        │
-├──────────────┴────────────┬─────────────────┤
-│       protocol/           │   constants.rs  │
-│  parsers.rs   (11 解析器)  │   helpers.rs    │
-│  types.rs     (数据结构)   │   error.rs      │
-│  constants.rs (协议常量)   │                 │
-├───────────────────────────┴─────────────────┤
-│            connection.rs (TCP)              │
-└─────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────┐
+│                    Python 层                         │
+│  tdxrs (核心): TdxHqClient / TdxDirectClient / Reader│
+│  tdxrs.pro (扩展): TdxHqEtfClient / TdxF10Client    │
+│  → list[dict] / list[tuple] / DataFrame             │
+├─────────────────────────────────────────────────────┤
+│                    PyO3 绑定层                       │
+│  py_client / py_direct_client / py_reader /         │
+│  py_etf / py_profile / py_dataframe / py_constants  │
+├─────────────┬──────────────┬────────────────────────┤
+│  net/       │  reader/     │  etf/  /  profile/     │
+│  client.rs  │  daily_bar   │  client    client      │
+│  pool.rs    │  min_bar     │  constants constants   │
+│  direct_*.rs│  block       │  types     parser      │
+│  async_*.rs │  financial   │  utils     parser_f10  │
+│  f10_client │              │                        │
+│  finance_*  │              │                        │
+├─────────────┴──────────────┴────────────────────────┤
+│              protocol/  +  constants / helpers       │
+│  parsers.rs (11) / adjuster.rs / types.rs           │
+│  constants.rs / finance_fields.rs                   │
+├─────────────────────────────────────────────────────┤
+│              connection.rs (TCP)                     │
+└─────────────────────────────────────────────────────┘
 ```
 
 ## 核心模块
@@ -78,7 +80,7 @@
 
 ### Net — 连接管理
 
-三种客户端覆盖不同使用场景：
+四种客户端覆盖不同使用场景：
 
 | 客户端 | 连接策略 | 特性 |
 |--------|----------|------|
@@ -93,6 +95,28 @@ borrow(server) → 空闲队列取 → 无空闲且未达上限 → 新建连接
                                                                     ↓
 return_connection ← 请求完成、guard 析构 ← 自动归还
 ```
+
+### ETF — 扩展模块 (`tdxrs.pro`)
+
+ETF 模块封装现有 `TdxHqClient`，提供 ETF 专用 API。通过代码前缀 (50/51=沪市, 15/16=深市) 自动识别 ETF。
+
+- **连接方式**: 共享连接池 (与股票行情相同)
+- **模块位置**: `src/etf/` (constants, types, client, utils)
+- **Python 绑定**: `src/python/py_etf.rs` → `TdxHqEtfClient`
+
+数据流: `Python 调用 → ETF 代码验证 → TdxHqClient API → ETF 类型转换 → dict`
+
+### Profile / F10 — 源码编译模块 (`--features f10`)
+
+F10 模块获取通达信公司基本面资料 (16 分类)，使用独立连接避免影响行情。因数据合规考虑，未包含在 pip 包中，需从源码编译启用。
+
+- **连接方式**: 独立 TCP 连接 (每次请求新建+握手+关闭)
+- **模块位置**: `src/profile/` (constants, types, parser, parser_f10, client) + `src/net/f10_client.rs`
+- **Python 绑定**: `src/python/py_profile.rs` → `TdxF10Client`
+
+数据流: `Python 调用 → 独立 TCP 连接 → 分类/内容 API → GBK 解码 → 文本解析 → 结构化数据`
+
+共享工具 (`net/utils.rs`): `auto_market`, `encode_gbk`, `encode_gbk_padded` 供 F10 和 Profile 共用。
 
 ## 数据输出格式
 
