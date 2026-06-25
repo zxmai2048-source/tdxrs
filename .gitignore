@@ -76,6 +76,12 @@ docs/WORK_LOG_*.md      # 旧版日志 (新版为 WORK_LOG.md)
 docs/tdxrs_quality_*.md      # 旧版日志 (新版为 WORK_LOG.md)
 
 # ============================================================
+# Removed modules (no longer in project)
+# ============================================================
+docs/public/ETF.md      # ETF 模块文档，ETF 模块已移除，基金功能统一由 src/fund/ 提供
+src/etf/                # ETF 模块已移除，基金功能统一由 src/fund/ 提供
+
+# ============================================================
 # Generated images (benchmark charts, regression plots, etc.)
 # ============================================================
 examples/*.png
