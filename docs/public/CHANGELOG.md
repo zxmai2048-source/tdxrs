@@ -1,5 +1,205 @@
 # 变更日志
 
+## v0.6.5 (2026-07-02) — 逐笔成交精度修正 + CLI 增强 + 板块模块扩展
+
+### 新增
+- **TdxBlockClient 板块列表获取** — 新增 `get_block_list`、`get_industry_blocks`、`get_concept_blocks`、`get_index_blocks` 方法
+  - 从服务器下载并解析 `.dat` 板块文件
+  - Python 绑定同步暴露，返回 `list[dict]`
+- **板块解析器无效数据过滤** — `parse_block` / `parse_block_group` 现在过滤 `block_type != 2` 的伪数据
+  - 此前解析器会将对齐错误产生的股票代码片段混入板块名称
+  - 过滤后仅返回有效板块记录
+- **逐笔成交增加 reserved 字段** — `get_transaction_data` / `get_history_transaction_data` 返回值新增 `"reserved"` 字段
+  - 原为被跳过的 extra field，现已解析
+  - 股票数据中该字段始终为 0（保留字段）
+- **CLI `trades` 命令增加笔数列** — 显示成交笔数 (`num` 字段)
+- **CLI 下载命令显示保存位置** — `download`、`update`、`download-xdxr` 命令现在会显示数据保存路径
+- **下载命令支持日期范围** — `download` 和 `update` 命令新增 `--start` 和 `--end` 参数
+  - `tdxrs download 600519 --start 2024-01-01 --end 2024-12-31`
+  - `tdxrs update --start 2024-06-01` — 从指定日期开始增量更新
+- **update 命令支持指定股票** — `update` 命令新增 `--code` 参数
+  - `tdxrs update --code 600519` — 增量更新指定股票
+  - 默认行为：只更新已下载的股票（不会下载新股票）
+
+### 修复
+- **分时时间映射统一修正** — 上下开盘集合竞价均视为无有效数据点
+  - 上午: 09:31 ~ 11:30 (index 0-119)，不含 09:30
+  - 下午: 13:01 ~ 15:00 (index 120-239)，不含 13:00
+  - 共 240 个数据点
+- **场内基金证券类型扩展** — 58xxxx (科创板ETF) 现在正确识别为场内基金
+- **逐笔成交价格精度修正** — 场内基金 (ETF/LOF/REITs) 逐笔成交价格现在使用正确的系数 (0.001)
+- **分时数据价格系数修正** — `get_minute_time_data` 改为委托给历史分时 API，修复基金类价格 1000x 偏高问题
+  - 影响: 所有客户端 (TdxHqClient / TdxDirectClient / AsyncTdxHqClient / TdxHqFundClient)
+  - 原因: 实时分时 API (0x051d) 的价格编码与历史分时 API (0x0fb4) 不同
+- **无效代码容错** — `parse_security_bars` / `parse_index_bars` 遇到无效日期时截断返回，而非报错
+- **TdxBlockClient Python 绑定** — 新增 `TdxBlockClient` Python 类，支持板块 K 线和行情查询
+
+### 文档
+- **明确成交量单位** — 分时数据和逐笔成交的 `vol` 字段单位为**手**（1手=100股）
+- **CLI 文档补充** — 添加默认下载位置和文件结构说明，更新 download/update 命令文档
+
+## v0.6.4 (2026-06-30) — 分时数据增加均价字段
+
+### 新增
+- **分时数据增加 avg_price 字段** — `get_minute_time_data` / `get_history_minute_time_data` 返回值新增 `"avg_price"` 字段（成交均价）
+  - 计算方式: 累计金额 / 累计成交量
+  - 所有客户端 (TdxHqClient / TdxDirectClient / AsyncTdxHqClient / TdxHqFundClient) 同步生效
+  - CLI `minutes` 命令同步增加"均价"列
+- **分时数据默认倒序** — `get_history_minute_time_data` 返回数据默认按时间倒序排列（最新记录在前）
+  - 在 Rust 解析层实现，Python 层无需额外处理
+  - 便于查看最新数据，`--count N` 取最新 N 条
+- **`minute_time_from_index` 公共方法** — 从 `protocol::parsers` 导出，供其他模块调用
+
+### 修复
+- **分时数据格式修正** — `get_minute_time_data` 内部改为调用历史分时 API，修复数据格式异常问题
+  - 命令码 0x051d (实时) 存在差分编码异常，改用 0x0fb4 (历史)
+  - 传入今日日期即可获取当日数据，格式与历史数据一致
+- **分时时间映射修正** — 修正时间计算逻辑
+  - 上午: 09:31 ~ 11:30 (index 0-119)，不含集合竞价 09:30
+  - 下午: 13:00 ~ 14:59 (index 120-239)，不含收盘 15:00
+  - 共 240 个数据点
+
+## v0.6.3 (2026-06-25) — 异步客户端 + 限流 + 下载增强 + ErrorCode 迁移
+
+### 新增
+- **分时数据增加 time 字段** — `get_minute_time_data` / `get_history_minute_time_data` 返回值新增 `"time"` 字段（格式 `"HH:MM"`）
+  - 基于数据索引推算: 上午 09:31~11:30 (index 0-119), 下午 13:00~14:59 (index 120-239)
+  - 所有客户端 (TdxHqClient / TdxDirectClient / AsyncTdxHqClient / TdxHqFundClient) 同步生效
+- **常量别名** — `PORT` (= `DEFAULT_PORT`), `POOL_SIZE` (= `DEFAULT_POOL_SIZE`)
+  - 从 `tdxrs.constants` 导入即可使用
+- **AsyncTdxHqClient 心跳** — tokio async 心跳任务
+  - 每 10s 通过连接通道发送 keepalive 包 (`get_security_count(market=0)`)
+  - 失败标记 `connected=false`，不触发重连 (由下次请求懒重连)
+  - `connect()` 自动启动，`disconnect()` 自动停止
+- **AsyncTdxHqClient Python 绑定** (`PyAsyncTdxHqClient`)
+  - 内部持有独立 `tokio::runtime::Runtime`，通过 `block_on()` 同步调用
+  - API 与 `TdxHqClient` 完全一致: 13 个数据方法 × 3 种输出格式 (dict/tuple/DataFrame)
+  - 已注册到 `__init__.py`，`from tdxrs import AsyncTdxHqClient` 直接可用
+- **AsyncTdxHqClient 集成测试** — 14 个真实服务器测试
+  - 覆盖: 连接管理、全部 API、并发 `tokio::join!`、交易阶段检测、断线重连
+  - 运行: `cargo test --features integration --test test_async_client`
+- **交易时段限流** (`TradingPhase`) — 3 档自适应限流
+  - Trading (盘中 9:30-15:00): 15 req/s
+  - PrePost (盘前盘后): 30 req/s
+  - Closed (休市): 60 req/s
+  - 每连接独立限流，4 连接池实际吞吐 ×4
+  - `auto_detect_phase()` 自动检测，基于 UTC+8 本地时间
+  - Python: `client.set_phase("trading")` / `client.auto_detect_phase()`
+- **批量行情查询上限** — `MAX_QUOTES_COUNT = 60`
+  - `get_security_quotes` / `get_fund_quotes` 单次上限 60 只，超出自动截断并打印警告
+  - 客户端侧截断 + 日志提醒，避免服务端静默丢弃数据
+- **Downloader 按日下载** — 分时/逐笔数据按日期下载
+  - `download_minute(dates, codes)` — 分时数据，协议原生日期查询
+  - `download_ticks(dates, codes)` — 逐笔成交，自动翻页 (2000条/页)
+  - `codes` 为必填参数，不支持全市场模式
+  - 日期参数支持 `int`/`str`/`list`，自动去重排序
+- **ErrorCode 体系全面迁移** — 49 处错误从原始变体迁移到结构化错误码
+  - `error_codes.rs`: 新增 `ErrorCode::err()` 便捷方法
+  - `fund/client.rs`: 9 处 `ResponseParse` → `FUND_CODE_NOT_SUPPORTED` / `INVALID_FORMAT`
+  - `protocol/parsers.rs`: 15 处 → `RESPONSE_LENGTH_MISMATCH` / `INVALID_DATE`
+  - `net/` 各模块: `CONNECTION_FAILED` / `RETRY_EXHAUSTED` / `DISCONNECTED` / `DECOMPRESS_FAILED` / `POOL_EXHAUSTED` 等
+  - `net/`、`fund/`、`protocol/` 三个目录中 `ResponseParse` 和 `InvalidData` 已清零
+
+### 变更
+- **ETF 向后兼容代码清理** — 移除 ~300 行冗余代码
+  - `src/fund/`: 移除 10 个 ETF 别名方法、5 个 ETF 常量别名、6 个 ETF 类型别名
+  - `src/python/py_fund.rs`: 移除 10 个 ETF 兼容方法 + `is_etf` 静态方法
+  - `src/python/py_etf.rs`: 删除 (444 行死代码，引用不存在的 `crate::etf`)
+  - `TdxHqEtfClient` 类型别名、`EtfError` 类型别名均已移除
+- **`pro.py` 弃用** — 替换为 `__getattr__` 懒加载弃用提示
+  - `TdxHqEtfClient` → 重定向到 `TdxHqFundClient`
+  - `TdxF10Client` → 提示需源码编译
+- **版本号对齐** — `pyproject.toml` 同步更新至 0.6.3
+
+### 修复
+- **基金价格精度修复**
+  - 修复场外基金 (519xxx) 价格系数错误的问题
+  - 场内基金 (ETF/LOF/REITs): 系数 0.001 (3位小数)
+  - 场外基金 (传统开放式基金): 系数 0.00001 (5位小数)
+  - 修复前: 519003 显示 390.50 (错误)
+  - 修复后: 519003 显示 3.9050 (正确，单位净值)
+- **证券类型分类修复**
+  - 修复沪市代码分类顺序，避免基金被误判为指数
+  - 新增场外基金类型 (type=5)，区分场内/场外基金
+
+### 文档
+- **Python 最佳实践** (`docs/public/PYTHON_BEST_PRACTICES.md`) — 限流规则、客户端选择、输出格式、批量优化、反模式
+- **API 参考** — 新增 AsyncTdxHqClient 完整文档 + Downloader 按日下载说明
+- **架构说明** — 扩展 Net 模块描述，补充通道化连接池架构
+- **F10 文档** — 新增 F10 公司资料使用指南
+- **基金文档** — 新增数据核对注意事项 (OpenEnd K线100x、债券ETF净值差异)
+- **变更日志** — 合并 v0.6.3 全部变更
+
+### 测试
+- 单元测试: 193 → 196 (+3 心跳测试)
+- 集成测试: 0 → 14 (AsyncTdxHqClient 真实服务器)
+- 总计: 210 tests passed
+
+---
+
+## v0.6.2 (2026-06-23) — 基金模块 + 板块查询 + 错误码
+
+### 新增
+- **基金模块** (`tdxrs.fund`)
+  - ETF 模块重构为基金模块，覆盖 ETF/LOF/REITs/分级基金等全部基金类型
+  - 新增 `FundType` 枚举: Etf / Lof / Reits / Structured / OpenEnd / Bond / Money / Other
+  - `classify_fund(market, code)` 自动分类基金类型
+  - 向后兼容: `TdxHqEtfClient` / `get_etf_list()` 等旧接口保留
+- **板块查询模块** (`tdxrs.block`)
+  - `TdxBlockClient` 板块专用客户端，内置K线级别限制
+  - `BlockQuery` 查询引擎: 搜索/列表/成分查询
+  - 指数成分精确匹配 (000300→沪深300)，行业/概念模糊搜索
+  - 板块K线限制: 日/周/月无限制，分钟级默认50条，1min禁用
+- **统一错误码体系** (`error_codes.rs`)
+  - 30+ 错误码，按模块分段: 通用(1000)/代码分类(1100)/限流(1200)/连接(2000)/解析(3000)/文件(4000)
+  - 板块代码(88xxxx)在通用客户端中自动拦截，返回 `[E1101]`
+  - Python 端暴露错误码常量: `ERR_BLOCK_CODE_IN_GENERAL_CLIENT` 等
+- **代码分类检测**
+  - `classify_code()` / `is_block_code()` / `is_stock_code()` / `is_index_code()`
+  - 通用客户端自动检测板块代码并拒绝
+
+### 变更
+- `src/etf/` 模块已移除，`src/fund/` 为唯一基金模块
+- 通用客户端 (`TdxHqClient` / `TdxDirectClient`) 新增板块代码拦截
+- Python 错误处理统一使用带错误码格式
+
+---
+
+## v0.6.1 (2026-06-23) — 限流 + 批量下载 + 日志
+
+### 新增
+- **请求限流** — 分级限流保护 TDX 服务器
+  - 默认 50 req/s (通用), 日K 15 req/s, 分时 10 req/s (不可禁用)
+  - 分时限流硬锁定，防止高频请求影响服务器
+  - 全局上限 200 req/s，超过自动降级
+  - Python API: `set_rate_limit(rps)` / `set_rate_limit_daily(rps)`
+- **批量下载器** (`tdxrs.downloader.Downloader`)
+  - 多服务器轮转分发，总吞吐量倍增
+  - 默认 `.day` 格式，可被 `DailyBarReader` 直接读取
+  - 支持 CSV / Parquet 格式 (需用户设置)
+  - 增量更新 + 断点续传
+  - 自动翻页 (每页 800 条)
+- **日志系统激活** — 所有网络模块添加结构化日志
+  - 连接/断开/重试/重连/心跳失败/连接池耗尽
+  - 模块前缀: `hq` / `direct` / `f10` / `finance` / `pool` / `profile`
+  - release 默认 WARN 级别，零性能影响
+- **CLI 命令行工具** (`tdxrs.cli`)
+  - 11 个子命令: quote / bars / minutes / trades / stocks / index / download / update / parse / servers / version
+  - 参数锁上限 (quote 20 只, bars 800 条, download 50 req/s)
+  - 三种输出格式: table / json / csv
+  - 安装后直接使用: `tdxrs quote 600519`
+- **日期校验** — `parse_security_bars` / `parse_index_bars` 增加年份范围检查
+  - `max_valid_year()` 动态计算 (当前年份+10)，自动适应
+  - 服务器返回损坏数据时返回解析错误，不再让 Python datetime 抛异常
+
+### 变更
+- `net/utils.rs` 新增 `RateLimiter` 结构体
+- `constants.rs` 新增 `max_valid_year()` 函数
+- `eprintln!` 替换为 `loge!` (受 `TDXRS_LOG` 级别控制)
+- 测试: 128 → 139 (新增限流/日期/常量测试)
+
+---
+
 ## v0.6.0 (2026-06-21) — 扩展模块: ETF + F10
 
 ### 新增
@@ -27,7 +227,7 @@
 - `profile/types.rs` `F10Category` 新增 `filename_raw` 字段
 
 ### 文档
-- 新增 [ETF 模块文档](ETF.md)
+- 新增 [ETF 模块文档](../dev/ETF.md)
 - 新增 [F10 模块文档](F10.md)
 - 更新 README: 新增 PyPI/Stars 徽章、Star History、扩展模块介绍
 

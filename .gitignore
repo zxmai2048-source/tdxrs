@@ -46,18 +46,23 @@ python/tdxrs/_internal.*.so
 .claude/
 localsession
 
-# PyPI / credentials
-pypi.md
-
-# Personal
-todo.md
-提示词规范.md
 tools/
 
 # ============================================================
 # Test artifacts (auto-generated, reproducible)
 # ============================================================
 tests/comparison_reports/
+
+# ============================================================
+# Development-only tests and examples (not part of release)
+# ============================================================
+tests/dev/
+examples/dev/
+
+# ============================================================
+# Downloaded market data (local cache, not part of release)
+# ============================================================
+data/
 
 # ============================================================
 # Original Python tdxpy reference (not part of Rust project)
@@ -70,7 +75,6 @@ tdxpy/
 docs/dev/               # 非正式开发笔记
 docs/del/               # 已弃用文档备份
 docs/demo-F10/          # F10 示例数据 (合规考虑不入库)
-examples/f10/output/    # F10 输出数据 (合规考虑不入库)
 /docs/private/
 docs/WORK_LOG_*.md      # 旧版日志 (新版为 WORK_LOG.md)
 docs/tdxrs_quality_*.md      # 旧版日志 (新版为 WORK_LOG.md)
@@ -85,6 +89,8 @@ docs/tdxrs_quality_*.md      # 旧版日志 (新版为 WORK_LOG.md)
 examples/*.png
 docs/public/bench_*.png
 examples/local/
+examples/output/
+examples/test_output/
 
 # ============================================================
 # OS

@@ -2,6 +2,7 @@
 //!
 //! 在 lib.rs 中调用 `register_constants(m)?` 将所有常量注入模块。
 
+use crate::error_codes::ErrorCode;
 use crate::protocol::constants;
 use pyo3::prelude::*;
 
@@ -40,11 +41,57 @@ pub fn register_constants(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.setattr("DEFAULT_POOL_SIZE", constants::DEFAULT_POOL_SIZE)?;
     m.setattr("FQ_PRICE_PRECISION", constants::FQ_PRICE_PRECISION)?;
 
+    // 别名 (向后兼容)
+    m.setattr("PORT", constants::DEFAULT_PORT)?;
+    m.setattr("POOL_SIZE", constants::DEFAULT_POOL_SIZE)?;
+
     // 板块文件名
     m.setattr("BLOCK_SZ", constants::BLOCK_SZ)?;
     m.setattr("BLOCK_FG", constants::BLOCK_FG)?;
     m.setattr("BLOCK_GN", constants::BLOCK_GN)?;
     m.setattr("BLOCK_DEFAULT", constants::BLOCK_DEFAULT)?;
+
+    // 错误码 — 通用
+    m.setattr("ERR_EMPTY_ARGUMENT", ErrorCode::EMPTY_ARGUMENT.0)?;
+    m.setattr("ERR_ARGUMENT_TOO_LONG", ErrorCode::ARGUMENT_TOO_LONG.0)?;
+    m.setattr("ERR_ARGUMENT_OUT_OF_RANGE", ErrorCode::ARGUMENT_OUT_OF_RANGE.0)?;
+    m.setattr("ERR_INVALID_FORMAT", ErrorCode::INVALID_FORMAT.0)?;
+
+    // 错误码 — 代码分类
+    m.setattr("ERR_BLOCK_CODE_IN_GENERAL_CLIENT", ErrorCode::BLOCK_CODE_IN_GENERAL_CLIENT.0)?;
+    m.setattr("ERR_BOND_CODE_NOT_SUPPORTED", ErrorCode::BOND_CODE_NOT_SUPPORTED.0)?;
+    m.setattr("ERR_FUND_CODE_NOT_SUPPORTED", ErrorCode::FUND_CODE_NOT_SUPPORTED.0)?;
+    m.setattr("ERR_UNKNOWN_CODE_FORMAT", ErrorCode::UNKNOWN_CODE_FORMAT.0)?;
+
+    // 错误码 — 限流
+    m.setattr("ERR_RATE_LIMIT_EXCEEDED", ErrorCode::RATE_LIMIT_EXCEEDED.0)?;
+    m.setattr("ERR_RATE_LIMIT_DAILY_EXCEEDED", ErrorCode::RATE_LIMIT_DAILY_EXCEEDED.0)?;
+    m.setattr("ERR_RATE_LIMIT_MINUTE_EXCEEDED", ErrorCode::RATE_LIMIT_MINUTE_EXCEEDED.0)?;
+    m.setattr("ERR_BLOCK_KLINE_CATEGORY_NOT_ALLOWED", ErrorCode::BLOCK_KLINE_CATEGORY_NOT_ALLOWED.0)?;
+    m.setattr("ERR_BLOCK_KLINE_COUNT_EXCEEDED", ErrorCode::BLOCK_KLINE_COUNT_EXCEEDED.0)?;
+    m.setattr("ERR_BLOCK_MINUTE_DISABLED", ErrorCode::BLOCK_MINUTE_DISABLED.0)?;
+    m.setattr("ERR_BLOCK_TRADES_DISABLED", ErrorCode::BLOCK_TRADES_DISABLED.0)?;
+
+    // 错误码 — 连接
+    m.setattr("ERR_CONNECTION_FAILED", ErrorCode::CONNECTION_FAILED.0)?;
+    m.setattr("ERR_CONNECTION_TIMEOUT", ErrorCode::CONNECTION_TIMEOUT.0)?;
+    m.setattr("ERR_DISCONNECTED", ErrorCode::DISCONNECTED.0)?;
+    m.setattr("ERR_HANDSHAKE_FAILED", ErrorCode::HANDSHAKE_FAILED.0)?;
+    m.setattr("ERR_RETRY_EXHAUSTED", ErrorCode::RETRY_EXHAUSTED.0)?;
+    m.setattr("ERR_POOL_EXHAUSTED", ErrorCode::POOL_EXHAUSTED.0)?;
+
+    // 错误码 — 解析
+    m.setattr("ERR_INVALID_DATE", ErrorCode::INVALID_DATE.0)?;
+    m.setattr("ERR_DATE_OUT_OF_RANGE", ErrorCode::DATE_OUT_OF_RANGE.0)?;
+    m.setattr("ERR_INVALID_STOCK_CODE", ErrorCode::INVALID_STOCK_CODE.0)?;
+    m.setattr("ERR_MISSING_FIELD", ErrorCode::MISSING_FIELD.0)?;
+    m.setattr("ERR_TYPE_MISMATCH", ErrorCode::TYPE_MISMATCH.0)?;
+
+    // 错误码 — 文件
+    m.setattr("ERR_FILE_NOT_FOUND", ErrorCode::FILE_NOT_FOUND.0)?;
+    m.setattr("ERR_INVALID_FILE_FORMAT", ErrorCode::INVALID_FILE_FORMAT.0)?;
+    m.setattr("ERR_FILE_TOO_SMALL", ErrorCode::FILE_TOO_SMALL.0)?;
+    m.setattr("ERR_FILE_READ_ERROR", ErrorCode::FILE_READ_ERROR.0)?;
 
     Ok(())
 }

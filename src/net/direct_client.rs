@@ -3,12 +3,15 @@
 //! 适用场景：偶发请求，不需要维护长连接
 
 use crate::error::{Result, TdxError};
+use crate::error_codes::ErrorCode;
 use crate::net::connection::TcpConnection;
 use crate::net::packet::{ResponseHeader, RSP_HEADER_LEN};
 use crate::net::utils;
 use crate::protocol::constants::*;
 use crate::protocol::parsers::*;
 use crate::protocol::types::*;
+use crate::loge;
+use crate::logw;
 
 /// 裸连接客户端
 ///
@@ -44,7 +47,11 @@ impl TdxDirectClient {
     // ================================================================
 
     fn send_and_recv(&self, packet: &[u8]) -> Result<Vec<u8>> {
-        let mut conn = TcpConnection::connect(&self.ip, self.port, self.timeout)?;
+        let mut conn = TcpConnection::connect(&self.ip, self.port, self.timeout)
+            .map_err(|e| {
+                loge!("direct", "connect to {}:{} failed: {}", self.ip, self.port, e);
+                e
+            })?;
         utils::perform_handshake(&mut conn)?;
 
         conn.send(packet)?;
@@ -61,7 +68,7 @@ impl TdxDirectClient {
         }
 
         if body_buf.is_empty() {
-            return Err(TdxError::Disconnected);
+            return Err(crate::error_codes::ErrorCode::DISCONNECTED.err("empty response body"));
         }
 
         if header.zip_size != header.unzip_size {
@@ -69,6 +76,17 @@ impl TdxDirectClient {
         } else {
             Ok(body_buf)
         }
+    }
+
+    /// 检查代码是否为板块代码 (88xxxx)，如果是则返回错误
+    fn check_not_block_code(&self, code: &str) -> Result<()> {
+        if crate::error_codes::is_block_code(code) {
+            return Err(TdxError::coded(
+                ErrorCode::BLOCK_CODE_IN_GENERAL_CLIENT,
+                format!("code={}", code),
+            ));
+        }
+        Ok(())
     }
 
     fn fetch_context_bars_for_adjust(
@@ -98,6 +116,7 @@ impl TdxDirectClient {
         count: u16,
         fq: u8,
     ) -> Result<Vec<SecurityBar>> {
+        self.check_not_block_code(code)?;
         let pkt = utils::build_security_bars_packet(category, market, code, start, count, fq);
         let mut bars = parse_security_bars(&self.send_and_recv(&pkt)?, category)?;
         if fq != 0 {
@@ -121,6 +140,22 @@ impl TdxDirectClient {
         count: u16,
         fq: u8,
     ) -> Result<Vec<IndexBar>> {
+        self.check_not_block_code(code)?;
+        self.get_index_bars_inner(category, market, code, start, count, fq)
+    }
+
+    /// 获取指数K线 (内部方法，跳过板块代码检查)
+    ///
+    /// 供 TdxBlockClient 调用，板块代码 (88xxxx) 需要通过此方法查询。
+    pub(crate) fn get_index_bars_inner(
+        &self,
+        category: u8,
+        market: u8,
+        code: &str,
+        start: u32,
+        count: u16,
+        fq: u8,
+    ) -> Result<Vec<IndexBar>> {
         let _ = fq; // 指数不复权，强制 fq=0 发送
         let pkt = utils::build_index_bars_packet(category, market, code, start, count, 0);
         let body = self.send_and_recv(&pkt)?;
@@ -131,10 +166,35 @@ impl TdxDirectClient {
     // 实时行情
     // ================================================================
 
+    /// 获取实时行情
+    ///
+    /// 单次查询上限 60 只 (TDX 服务端硬限制)，超出自动截断并打印警告。
     pub fn get_security_quotes(
         &self,
         all_stock: &[(u8, &str)],
     ) -> Result<Vec<SecurityQuote>> {
+        // 检查是否有板块代码
+        for &(_, code) in all_stock {
+            self.check_not_block_code(code)?;
+        }
+        self.get_security_quotes_inner(all_stock)
+    }
+
+    /// 获取实时行情 (内部方法，跳过板块代码检查)
+    ///
+    /// 供 TdxBlockClient 调用，板块代码 (88xxxx) 需要通过此方法查询。
+    pub(crate) fn get_security_quotes_inner(
+        &self,
+        all_stock: &[(u8, &str)],
+    ) -> Result<Vec<SecurityQuote>> {
+        // 服务端上限截断
+        let all_stock = if all_stock.len() > MAX_QUOTES_COUNT {
+            logw!("direct", "批量行情查询超过上限 {}/{}，自动截断。请自行分组调用。",
+                  all_stock.len(), MAX_QUOTES_COUNT);
+            &all_stock[..MAX_QUOTES_COUNT]
+        } else {
+            all_stock
+        };
         let stock_len = all_stock.len() as u16;
         let pkgdatalen = (stock_len as u32) * 7 + 12;
         let mut pkt = Vec::with_capacity(26 + stock_len as usize * 7);
@@ -181,20 +241,14 @@ impl TdxDirectClient {
     // 分时数据
     // ================================================================
 
+    /// 获取当日分时数据 (委托给历史分时 API，避免实时 API 价格编码异常)
     pub fn get_minute_time_data(
         &self,
         market: u8,
         code: &str,
     ) -> Result<Vec<MinuteTimePrice>> {
-        let code_buf = utils::code_bytes(code);
-        let mut pkt = Vec::with_capacity(24);
-        pkt.extend_from_slice(&[
-            0x0c, 0x1b, 0x08, 0x00, 0x01, 0x01, 0x0e, 0x00, 0x0e, 0x00, 0x1d, 0x05,
-        ]);
-        pkt.extend_from_slice(&(market as u16).to_le_bytes());
-        pkt.extend_from_slice(&code_buf);
-        pkt.extend_from_slice(&0u32.to_le_bytes());
-        parse_minute_time_data(&self.send_and_recv(&pkt)?, market, code)
+        let today = utils::today_yyyymmdd();
+        self.get_history_minute_time_data(market, code, today)
     }
 
     pub fn get_history_minute_time_data(
@@ -234,7 +288,8 @@ impl TdxDirectClient {
         pkt.extend_from_slice(&code_buf);
         pkt.extend_from_slice(&start.to_le_bytes());
         pkt.extend_from_slice(&count.to_le_bytes());
-        parse_transaction_data(&self.send_and_recv(&pkt)?)
+        let coefficient = get_security_coefficient(market, code);
+        parse_transaction_data_with_coefficient(&self.send_and_recv(&pkt)?, coefficient)
     }
 
     pub fn get_history_transaction_data(
@@ -255,7 +310,8 @@ impl TdxDirectClient {
         pkt.extend_from_slice(&code_buf);
         pkt.extend_from_slice(&start.to_le_bytes());
         pkt.extend_from_slice(&count.to_le_bytes());
-        parse_history_transaction_data(&self.send_and_recv(&pkt)?)
+        let coefficient = get_security_coefficient(market, code);
+        parse_history_transaction_data_with_coefficient(&self.send_and_recv(&pkt)?, coefficient)
     }
 
     // ================================================================

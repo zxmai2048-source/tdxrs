@@ -4,10 +4,10 @@ build-backend = "maturin"
 
 [project]
 name = "tdxrs"
-version = "0.6.0"
+version = "0.6.5"
 description = "TDX (通达信) market data parser — Rust implementation with Python bindings"
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.11"
 license = {text = "MIT"}
 keywords = ["tdx", "通达信", "stock", "market-data", "kline", "finance", "rust", "pyo3"]
 classifiers = [
@@ -27,6 +27,9 @@ dependencies = []
 authors = [
     {name = "Chiang Tao", email = "chiangtao_fan@hotmail.com"}
 ]
+
+[project.scripts]
+tdxrs = "tdxrs.cli:main"
 
 [project.optional-dependencies]
 pandas = ["pandas>=1.0"]   # for *_dataframe() methods

@@ -113,6 +113,8 @@ pub const KLINE_YEARLY: u8 = 11;
 
 pub const MAX_KLINE_COUNT: u16 = 800;
 pub const MAX_TRANSACTION_COUNT: u16 = 2000;
+/// 单次批量行情查询上限 (TDX 服务端硬限制，超出自动截断)
+pub const MAX_QUOTES_COUNT: usize = 60;
 
 // ============================================================
 // 默认配置

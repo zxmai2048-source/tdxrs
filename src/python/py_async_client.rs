@@ -1,16 +1,20 @@
+//! AsyncTdxHqClient Python 绑定
+//!
+//! 基于 tokio 异步客户端的同步 Python 包装，内部持有独立 Runtime。
+//! API 与 `TdxHqClient` 完全一致，底层使用通道化连接池实现并发。
+
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyTuple};
 use pyo3::IntoPyObjectExt;
 
 use crate::error::TdxError;
-use crate::net::client::TdxHqClient;
+use crate::net::async_client::AsyncTdxHqClient;
+use crate::net::utils::TradingPhase;
 
-/// 将 TdxError 转换为 Python 异常 (带错误码)
+/// 将 TdxError 转换为 Python 异常
 fn to_py_err(e: TdxError) -> PyErr {
     match &e {
-        TdxError::Coded(coded) => {
-            pyo3::exceptions::PyValueError::new_err(coded.format())
-        }
+        TdxError::Coded(coded) => pyo3::exceptions::PyValueError::new_err(coded.format()),
         TdxError::Connection(_) | TdxError::ConnectionTimeout | TdxError::Disconnected => {
             pyo3::exceptions::PyConnectionError::new_err(e.to_string())
         }
@@ -18,140 +22,113 @@ fn to_py_err(e: TdxError) -> PyErr {
     }
 }
 
-/// TDX 行情客户端 - Python 绑定
-#[pyclass(name = "TdxHqClient")]
-pub struct PyTdxHqClient {
-    client: TdxHqClient,
+/// 异步 TDX 行情客户端 — Python 绑定
+///
+/// 内部持有独立 tokio Runtime，底层使用通道化连接池实现并发。
+/// API 与 `TdxHqClient` 完全一致。
+///
+/// ```python
+/// from tdxrs._internal import AsyncTdxHqClient
+///
+/// client = AsyncTdxHqClient()
+/// client.connect("180.153.18.170", 7709)
+/// bars = client.get_security_bars(4, 1, "600519", 0, 100)
+/// client.disconnect()
+/// ```
+#[pyclass(name = "AsyncTdxHqClient")]
+pub struct PyAsyncTdxHqClient {
+    rt: tokio::runtime::Runtime,
+    client: AsyncTdxHqClient,
 }
 
 #[pymethods]
-impl PyTdxHqClient {
+impl PyAsyncTdxHqClient {
     #[new]
     fn new() -> Self {
         Self {
-            client: TdxHqClient::new(),
+            rt: tokio::runtime::Runtime::new().expect("failed to create tokio runtime"),
+            client: AsyncTdxHqClient::new(),
         }
     }
 
-    /// 连接到 TDX 服务器
+    /// 指定连接池大小创建
+    #[staticmethod]
+    #[pyo3(signature = (pool_size=4))]
+    fn with_pool_size(pool_size: usize) -> Self {
+        Self {
+            rt: tokio::runtime::Runtime::new().expect("failed to create tokio runtime"),
+            client: AsyncTdxHqClient::with_pool_size(pool_size),
+        }
+    }
+
+    // ============================================================
+    // 连接管理
+    // ============================================================
+
+    /// 连接到 TDX 服务器 (建立连接池)
     #[pyo3(signature = (ip, port, timeout=None))]
     fn connect(&self, ip: &str, port: u16, timeout: Option<f64>) -> PyResult<bool> {
-        self.client
-            .connect(ip, port, timeout)
+        self.rt
+            .block_on(self.client.connect(ip, port, timeout))
             .map_err(to_py_err)
     }
 
-    /// 断开连接
-    fn disconnect(&self) {
-        self.client.disconnect();
+    /// 连接到任意可用服务器
+    #[pyo3(signature = (timeout=None))]
+    fn connect_to_any(&self, timeout: Option<f64>) -> PyResult<bool> {
+        self.rt
+            .block_on(self.client.connect_to_any(timeout))
+            .map_err(to_py_err)
     }
 
-    /// 是否已连接
+    /// 断开所有连接
+    fn disconnect(&self) {
+        self.rt.block_on(self.client.disconnect());
+    }
+
+    /// 当前连接数
+    fn connection_count(&self) -> usize {
+        self.rt.block_on(self.client.connection_count())
+    }
+
+    /// 连接是否存活
     fn is_connected(&self) -> bool {
         self.client.is_connected()
     }
 
-    /// 连接到任意可用服务器 (从默认列表中选择)
-    #[pyo3(signature = (timeout=None))]
-    fn connect_to_any(&self, timeout: Option<f64>) -> PyResult<bool> {
-        self.client
-            .connect_to_any(timeout)
-            .map_err(to_py_err)
-    }
+    // ============================================================
+    // 配置
+    // ============================================================
 
-    /// 设置是否自动重试
-    fn set_auto_retry(&self, enabled: bool) {
-        self.client.set_auto_retry(enabled);
-    }
-
-    /// 设置缓存 TTL (秒)
-    fn set_cache_ttl(&self, ttl_secs: u64) {
-        self.client.set_cache_ttl(ttl_secs);
-    }
-
-    /// 设置连接超时 (秒)
-    fn set_connect_timeout(&self, timeout: f64) {
-        self.client.set_connect_timeout(timeout);
-    }
-
-    /// 设置默认请求速率限制 (每秒请求数, 0=禁用)
-    ///
-    /// 默认 50 req/s。影响: 实时行情、财务、除权等通用接口。
-    fn set_rate_limit(&self, rps: u32) {
+    /// 设置限流 RPS (每秒请求数, 0=禁用, 上限 200)
+    fn set_rate_limit(&mut self, rps: u32) {
         self.client.set_rate_limit(rps);
     }
 
-    /// 设置日K 级别速率限制 (每秒请求数, 0=禁用)
-    ///
-    /// 默认 15 req/s。影响: get_security_bars / get_index_bars。
-    fn set_rate_limit_daily(&self, rps: u32) {
-        self.client.set_rate_limit_daily(rps);
+    /// 设置交易阶段限流 (15/30/60 req/s)
+    fn set_phase(&mut self, phase: &str) {
+        let p = match phase {
+            "trading" => TradingPhase::Trading,
+            "prepost" => TradingPhase::PrePost,
+            "closed" => TradingPhase::Closed,
+            _ => return,
+        };
+        self.client.set_phase(p);
     }
 
-    /// 获取分时级别速率限制 (固定 10 req/s, 不可修改)
-    fn rate_limit_minute(&self) -> u32 {
-        self.client.rate_limit_minute()
-    }
-
-    /// 设置自定义优先服务器列表
-    ///
-    /// servers: list of (name, ip, port) tuples, e.g. [("海通8", "58.63.254.191", 7709), ...]
-    fn set_servers(&self, servers: Vec<(String, String, u16)>) {
-        let refs: Vec<(&str, &str, u16)> =
-            servers.iter().map(|(n, i, p)| (n.as_str(), i.as_str(), *p)).collect();
-        self.client.set_servers(&refs);
-    }
-
-    /// 在优先列表头部添加一台服务器
-    fn add_server(&self, name: &str, ip: &str, port: u16) {
-        self.client.add_server(name, ip, port);
-    }
-
-    /// 按响应时间重排优先服务器
-    ///
-    /// servers: 从 probe_servers() 返回的排序结果, 取前N个
-    fn reorder_servers(&self, servers: Vec<(String, String, u16)>) {
-        let refs: Vec<(&str, &str, u16)> =
-            servers.iter().map(|(n, i, p)| (n.as_str(), i.as_str(), *p)).collect();
-        self.client.reorder_servers(&refs);
-    }
-
-    /// 探测全部已知服务器, 返回按 API 响应时间排序的结果
-    ///
-    /// 返回: list of (name, ip, port, tcp_ms, hs_ms, api_ms)
-    /// 不会自动修改优先列表, 用户根据结果自行调用 reorder_servers()
-    #[pyo3(signature = (timeout=3.0))]
-    fn probe_servers(
-        &self,
-        py: Python<'_>,
-        timeout: f64,
-    ) -> PyResult<Py<PyAny>> {
-        let results = self.client.probe_servers(timeout);
-        let list = PyList::empty(py);
-        for (name, ip, port, tcp_ms, hs_ms, api_ms) in &results {
-            let tuple = PyTuple::new(py, &[
-                name.into_py_any(py)?,
-                ip.into_py_any(py)?,
-                port.into_py_any(py)?,
-                tcp_ms.into_py_any(py)?,
-                hs_ms.into_py_any(py)?,
-                api_ms.into_py_any(py)?,
-            ])?;
-            list.append(tuple)?;
+    /// 自动检测交易阶段并设置限流，返回阶段名称
+    fn auto_detect_phase(&mut self) -> String {
+        let phase = self.client.auto_detect_phase();
+        match phase {
+            TradingPhase::Trading => "trading".to_string(),
+            TradingPhase::PrePost => "prepost".to_string(),
+            TradingPhase::Closed => "closed".to_string(),
         }
-        Ok(list.into())
     }
 
-    /// 获取连接池状态
-    fn pool_stats(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let stats = self.client.pool_stats();
-        let dict = PyDict::new(py);
-        dict.set_item("idle", stats.idle)?;
-        dict.set_item("active", stats.active)?;
-        dict.set_item("total", stats.total)?;
-        dict.set_item("max_size", stats.max_size)?;
-        Ok(dict.into())
-    }
+    // ============================================================
+    // K线 — dict 输出
+    // ============================================================
 
     /// 获取K线数据
     ///
@@ -168,8 +145,8 @@ impl PyTdxHqClient {
         fq: u8,
     ) -> PyResult<Py<PyAny>> {
         let bars = self
-            .client
-            .get_security_bars(category, market, code, start, count, fq)
+            .rt
+            .block_on(self.client.get_security_bars(category, market, code, start, count, fq))
             .map_err(to_py_err)?;
 
         let list = PyList::empty(py);
@@ -204,8 +181,8 @@ impl PyTdxHqClient {
         fq: u8,
     ) -> PyResult<Py<PyAny>> {
         let bars = self
-            .client
-            .get_security_bars_all(category, market, code, count, fq)
+            .rt
+            .block_on(self.client.get_security_bars_all(category, market, code, count, fq))
             .map_err(to_py_err)?;
 
         let list = PyList::empty(py);
@@ -241,8 +218,8 @@ impl PyTdxHqClient {
         fq: u8,
     ) -> PyResult<Py<PyAny>> {
         let bars = self
-            .client
-            .get_index_bars(category, market, code, start, count, fq)
+            .rt
+            .block_on(self.client.get_index_bars(category, market, code, start, count, fq))
             .map_err(to_py_err)?;
 
         let list = PyList::empty(py);
@@ -279,8 +256,8 @@ impl PyTdxHqClient {
         fq: u8,
     ) -> PyResult<Py<PyAny>> {
         let bars = self
-            .client
-            .get_index_bars_all(category, market, code, count, fq)
+            .rt
+            .block_on(self.client.get_index_bars(category, market, code, 0, count, fq))
             .map_err(to_py_err)?;
 
         let list = PyList::empty(py);
@@ -305,7 +282,11 @@ impl PyTdxHqClient {
         Ok(list.into())
     }
 
-    /// 获取实时行情
+    // ============================================================
+    // 实时行情
+    // ============================================================
+
+    /// 获取实时行情 (批量)
     fn get_security_quotes(
         &self,
         py: Python<'_>,
@@ -313,8 +294,8 @@ impl PyTdxHqClient {
     ) -> PyResult<Py<PyAny>> {
         let refs: Vec<(u8, &str)> = all_stock.iter().map(|(m, c)| (*m, c.as_str())).collect();
         let quotes = self
-            .client
-            .get_security_quotes(&refs)
+            .rt
+            .block_on(self.client.get_security_quotes(&refs))
             .map_err(to_py_err)?;
 
         let list = PyList::empty(py);
@@ -327,7 +308,6 @@ impl PyTdxHqClient {
             dict.set_item("open", q.open)?;
             dict.set_item("high", q.high)?;
             dict.set_item("low", q.low)?;
-            dict.set_item("servertime", &q.servertime)?;
             dict.set_item("vol", q.vol)?;
             dict.set_item("cur_vol", q.cur_vol)?;
             dict.set_item("amount", q.amount)?;
@@ -335,27 +315,39 @@ impl PyTdxHqClient {
             dict.set_item("b_vol", q.b_vol)?;
             dict.set_item("bid1", q.bid1)?;
             dict.set_item("bid_vol1", q.bid_vol1)?;
-            dict.set_item("bid2", q.bid2)?;
-            dict.set_item("bid_vol2", q.bid_vol2)?;
-            dict.set_item("bid3", q.bid3)?;
-            dict.set_item("bid_vol3", q.bid_vol3)?;
-            dict.set_item("bid4", q.bid4)?;
-            dict.set_item("bid_vol4", q.bid_vol4)?;
-            dict.set_item("bid5", q.bid5)?;
-            dict.set_item("bid_vol5", q.bid_vol5)?;
             dict.set_item("ask1", q.ask1)?;
             dict.set_item("ask_vol1", q.ask_vol1)?;
+            dict.set_item("bid2", q.bid2)?;
+            dict.set_item("bid_vol2", q.bid_vol2)?;
             dict.set_item("ask2", q.ask2)?;
             dict.set_item("ask_vol2", q.ask_vol2)?;
+            dict.set_item("bid3", q.bid3)?;
+            dict.set_item("bid_vol3", q.bid_vol3)?;
             dict.set_item("ask3", q.ask3)?;
             dict.set_item("ask_vol3", q.ask_vol3)?;
+            dict.set_item("bid4", q.bid4)?;
+            dict.set_item("bid_vol4", q.bid_vol4)?;
             dict.set_item("ask4", q.ask4)?;
             dict.set_item("ask_vol4", q.ask_vol4)?;
+            dict.set_item("bid5", q.bid5)?;
+            dict.set_item("bid_vol5", q.bid_vol5)?;
             dict.set_item("ask5", q.ask5)?;
             dict.set_item("ask_vol5", q.ask_vol5)?;
+            dict.set_item("servertime", &q.servertime)?;
             list.append(dict)?;
         }
         Ok(list.into())
+    }
+
+    // ============================================================
+    // 证券列表 / 数量
+    // ============================================================
+
+    /// 获取证券数量
+    fn get_security_count(&self, market: u8) -> PyResult<u16> {
+        self.rt
+            .block_on(self.client.get_security_count(market))
+            .map_err(to_py_err)
     }
 
     /// 获取证券列表
@@ -366,30 +358,27 @@ impl PyTdxHqClient {
         market: u8,
         start: u16,
     ) -> PyResult<Py<PyAny>> {
-        let list_data = self
-            .client
-            .get_security_list(market, start)
+        let data = self
+            .rt
+            .block_on(self.client.get_security_list(market, start))
             .map_err(to_py_err)?;
 
         let list = PyList::empty(py);
-        for s in &list_data {
+        for d in &data {
             let dict = PyDict::new(py);
-            dict.set_item("code", &s.code)?;
-            dict.set_item("volunit", s.volunit)?;
-            dict.set_item("decimal_point", s.decimal_point)?;
-            dict.set_item("name", &s.name)?;
-            dict.set_item("pre_close", s.pre_close)?;
+            dict.set_item("code", &d.code)?;
+            dict.set_item("volunit", d.volunit)?;
+            dict.set_item("decimal_point", d.decimal_point)?;
+            dict.set_item("name", &d.name)?;
+            dict.set_item("pre_close", d.pre_close)?;
             list.append(dict)?;
         }
         Ok(list.into())
     }
 
-    /// 获取证券数量
-    fn get_security_count(&self, market: u8) -> PyResult<u16> {
-        self.client
-            .get_security_count(market)
-            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))
-    }
+    // ============================================================
+    // 分时 / 逐笔
+    // ============================================================
 
     /// 获取分时数据
     fn get_minute_time_data(
@@ -399,8 +388,8 @@ impl PyTdxHqClient {
         code: &str,
     ) -> PyResult<Py<PyAny>> {
         let data = self
-            .client
-            .get_minute_time_data(market, code)
+            .rt
+            .block_on(self.client.get_minute_time_data(market, code))
             .map_err(to_py_err)?;
 
         let list = PyList::empty(py);
@@ -424,8 +413,8 @@ impl PyTdxHqClient {
         date: u32,
     ) -> PyResult<Py<PyAny>> {
         let data = self
-            .client
-            .get_history_minute_time_data(market, code, date)
+            .rt
+            .block_on(self.client.get_history_minute_time_data(market, code, date))
             .map_err(to_py_err)?;
 
         let list = PyList::empty(py);
@@ -451,8 +440,8 @@ impl PyTdxHqClient {
         count: u16,
     ) -> PyResult<Py<PyAny>> {
         let data = self
-            .client
-            .get_transaction_data(market, code, start, count)
+            .rt
+            .block_on(self.client.get_transaction_data(market, code, start, count))
             .map_err(to_py_err)?;
 
         let list = PyList::empty(py);
@@ -481,8 +470,11 @@ impl PyTdxHqClient {
         date: u32,
     ) -> PyResult<Py<PyAny>> {
         let data = self
-            .client
-            .get_history_transaction_data(market, code, start, count, date)
+            .rt
+            .block_on(
+                self.client
+                    .get_history_transaction_data(market, code, start, count, date),
+            )
             .map_err(to_py_err)?;
 
         let list = PyList::empty(py);
@@ -499,6 +491,10 @@ impl PyTdxHqClient {
         Ok(list.into())
     }
 
+    // ============================================================
+    // 财务 / 除权除息
+    // ============================================================
+
     /// 获取财务信息
     fn get_finance_info(
         &self,
@@ -507,8 +503,8 @@ impl PyTdxHqClient {
         code: &str,
     ) -> PyResult<Py<PyAny>> {
         let info = self
-            .client
-            .get_finance_info(market, code)
+            .rt
+            .block_on(self.client.get_finance_info(market, code))
             .map_err(to_py_err)?;
 
         let dict = PyDict::new(py);
@@ -559,8 +555,8 @@ impl PyTdxHqClient {
         code: &str,
     ) -> PyResult<Py<PyAny>> {
         let data = self
-            .client
-            .get_xdxr_info(market, code)
+            .rt
+            .block_on(self.client.get_xdxr_info(market, code))
             .map_err(to_py_err)?;
 
         let list = PyList::empty(py);
@@ -587,30 +583,11 @@ impl PyTdxHqClient {
         Ok(list.into())
     }
 
-    /// 获取并解析板块信息
-    fn get_and_parse_block_info(
-        &self,
-        py: Python<'_>,
-        block_file: &str,
-    ) -> PyResult<Py<PyAny>> {
-        let data = self
-            .client
-            .get_and_parse_block_info(block_file)
-            .map_err(to_py_err)?;
+    // ============================================================
+    // Tuple 高性能输出
+    // ============================================================
 
-        let list = PyList::empty(py);
-        for d in &data {
-            let dict = PyDict::new(py);
-            dict.set_item("blockname", &d.blockname)?;
-            dict.set_item("block_type", d.block_type)?;
-            dict.set_item("code_index", d.code_index)?;
-            dict.set_item("code", &d.code)?;
-            list.append(dict)?;
-        }
-        Ok(list.into())
-    }
-
-    /// 获取K线数据，返回 list of tuple (高性能模式)
+    /// 获取K线数据, 返回 list of tuple (高性能模式)
     /// tuple: (open, close, high, low, vol, amount, year, month, day, hour, minute, datetime)
     #[pyo3(signature = (category, market, code, start=0, count=800, fq=1))]
     fn get_security_bars_tuples(
@@ -624,19 +601,25 @@ impl PyTdxHqClient {
         fq: u8,
     ) -> PyResult<Py<PyAny>> {
         let bars = self
-            .client
-            .get_security_bars(category, market, code, start, count, fq)
+            .rt
+            .block_on(self.client.get_security_bars(category, market, code, start, count, fq))
             .map_err(to_py_err)?;
 
         let list = PyList::empty(py);
         for b in &bars {
             let items: Vec<Py<PyAny>> = vec![
-                b.open.into_py_any(py)?, b.close.into_py_any(py)?,
-                b.high.into_py_any(py)?, b.low.into_py_any(py)?,
-                b.vol.into_py_any(py)?, b.amount.into_py_any(py)?,
-                b.year.into_py_any(py)?, b.month.into_py_any(py)?,
-                b.day.into_py_any(py)?, b.hour.into_py_any(py)?,
-                b.minute.into_py_any(py)?, b.datetime.as_str().into_py_any(py)?,
+                b.open.into_py_any(py)?,
+                b.close.into_py_any(py)?,
+                b.high.into_py_any(py)?,
+                b.low.into_py_any(py)?,
+                b.vol.into_py_any(py)?,
+                b.amount.into_py_any(py)?,
+                b.year.into_py_any(py)?,
+                b.month.into_py_any(py)?,
+                b.day.into_py_any(py)?,
+                b.hour.into_py_any(py)?,
+                b.minute.into_py_any(py)?,
+                b.datetime.as_str().into_py_any(py)?,
             ];
             let tuple = PyTuple::new(py, &items)?;
             list.append(tuple)?;
@@ -644,8 +627,7 @@ impl PyTdxHqClient {
         Ok(list.into())
     }
 
-    /// 获取指数K线，返回 list of tuple (高性能模式)
-    /// tuple: (open, close, high, low, vol, amount, year, month, day, hour, minute, datetime, up_count, down_count)
+    /// 获取指数K线, 返回 list of tuple (高性能模式)
     #[pyo3(signature = (category, market, code, start=0, count=800, fq=1))]
     fn get_index_bars_tuples(
         &self,
@@ -658,20 +640,27 @@ impl PyTdxHqClient {
         fq: u8,
     ) -> PyResult<Py<PyAny>> {
         let bars = self
-            .client
-            .get_index_bars(category, market, code, start, count, fq)
+            .rt
+            .block_on(self.client.get_index_bars(category, market, code, start, count, fq))
             .map_err(to_py_err)?;
 
         let list = PyList::empty(py);
         for b in &bars {
             let items: Vec<Py<PyAny>> = vec![
-                b.open.into_py_any(py)?, b.close.into_py_any(py)?,
-                b.high.into_py_any(py)?, b.low.into_py_any(py)?,
-                b.vol.into_py_any(py)?, b.amount.into_py_any(py)?,
-                b.year.into_py_any(py)?, b.month.into_py_any(py)?,
-                b.day.into_py_any(py)?, b.hour.into_py_any(py)?,
-                b.minute.into_py_any(py)?, b.datetime.as_str().into_py_any(py)?,
-                b.up_count.into_py_any(py)?, b.down_count.into_py_any(py)?,
+                b.open.into_py_any(py)?,
+                b.close.into_py_any(py)?,
+                b.high.into_py_any(py)?,
+                b.low.into_py_any(py)?,
+                b.vol.into_py_any(py)?,
+                b.amount.into_py_any(py)?,
+                b.year.into_py_any(py)?,
+                b.month.into_py_any(py)?,
+                b.day.into_py_any(py)?,
+                b.hour.into_py_any(py)?,
+                b.minute.into_py_any(py)?,
+                b.datetime.as_str().into_py_any(py)?,
+                b.up_count.into_py_any(py)?,
+                b.down_count.into_py_any(py)?,
             ];
             let tuple = PyTuple::new(py, &items)?;
             list.append(tuple)?;
@@ -679,9 +668,7 @@ impl PyTdxHqClient {
         Ok(list.into())
     }
 
-    /// 获取实时行情，返回 list of tuple (高性能模式)
-    /// tuple: (market, code, price, last_close, open, high, low, vol, cur_vol, amount,
-    ///         s_vol, b_vol, bid1, bid_vol1, ask1, ask_vol1, ..., bid5, bid_vol5, ask5, ask_vol5)
+    /// 获取实时行情, 返回 list of tuple (高性能模式)
     fn get_security_quotes_tuples(
         &self,
         py: Python<'_>,
@@ -689,28 +676,45 @@ impl PyTdxHqClient {
     ) -> PyResult<Py<PyAny>> {
         let refs: Vec<(u8, &str)> = all_stock.iter().map(|(m, c)| (*m, c.as_str())).collect();
         let quotes = self
-            .client
-            .get_security_quotes(&refs)
+            .rt
+            .block_on(self.client.get_security_quotes(&refs))
             .map_err(to_py_err)?;
 
         let list = PyList::empty(py);
         for q in &quotes {
             let items: Vec<Py<PyAny>> = vec![
-                q.market.into_py_any(py)?, q.code.as_str().into_py_any(py)?,
-                q.price.into_py_any(py)?, q.last_close.into_py_any(py)?,
-                q.open.into_py_any(py)?, q.high.into_py_any(py)?, q.low.into_py_any(py)?,
-                q.vol.into_py_any(py)?, q.cur_vol.into_py_any(py)?, q.amount.into_py_any(py)?,
-                q.s_vol.into_py_any(py)?, q.b_vol.into_py_any(py)?,
-                q.bid1.into_py_any(py)?, q.bid_vol1.into_py_any(py)?,
-                q.ask1.into_py_any(py)?, q.ask_vol1.into_py_any(py)?,
-                q.bid2.into_py_any(py)?, q.bid_vol2.into_py_any(py)?,
-                q.ask2.into_py_any(py)?, q.ask_vol2.into_py_any(py)?,
-                q.bid3.into_py_any(py)?, q.bid_vol3.into_py_any(py)?,
-                q.ask3.into_py_any(py)?, q.ask_vol3.into_py_any(py)?,
-                q.bid4.into_py_any(py)?, q.bid_vol4.into_py_any(py)?,
-                q.ask4.into_py_any(py)?, q.ask_vol4.into_py_any(py)?,
-                q.bid5.into_py_any(py)?, q.bid_vol5.into_py_any(py)?,
-                q.ask5.into_py_any(py)?, q.ask_vol5.into_py_any(py)?,
+                q.market.into_py_any(py)?,
+                q.code.as_str().into_py_any(py)?,
+                q.price.into_py_any(py)?,
+                q.last_close.into_py_any(py)?,
+                q.open.into_py_any(py)?,
+                q.high.into_py_any(py)?,
+                q.low.into_py_any(py)?,
+                q.vol.into_py_any(py)?,
+                q.cur_vol.into_py_any(py)?,
+                q.amount.into_py_any(py)?,
+                q.s_vol.into_py_any(py)?,
+                q.b_vol.into_py_any(py)?,
+                q.bid1.into_py_any(py)?,
+                q.bid_vol1.into_py_any(py)?,
+                q.ask1.into_py_any(py)?,
+                q.ask_vol1.into_py_any(py)?,
+                q.bid2.into_py_any(py)?,
+                q.bid_vol2.into_py_any(py)?,
+                q.ask2.into_py_any(py)?,
+                q.ask_vol2.into_py_any(py)?,
+                q.bid3.into_py_any(py)?,
+                q.bid_vol3.into_py_any(py)?,
+                q.ask3.into_py_any(py)?,
+                q.ask_vol3.into_py_any(py)?,
+                q.bid4.into_py_any(py)?,
+                q.bid_vol4.into_py_any(py)?,
+                q.ask4.into_py_any(py)?,
+                q.ask_vol4.into_py_any(py)?,
+                q.bid5.into_py_any(py)?,
+                q.bid_vol5.into_py_any(py)?,
+                q.ask5.into_py_any(py)?,
+                q.ask_vol5.into_py_any(py)?,
             ];
             let tuple = PyTuple::new(py, &items)?;
             list.append(tuple)?;
@@ -719,17 +723,24 @@ impl PyTdxHqClient {
     }
 
     // ============================================================
-    // DataFrame 输出 (列式, 高性能)
+    // DataFrame 输出
     // ============================================================
 
     /// 获取K线数据, 返回 pandas DataFrame
     #[pyo3(signature = (category, market, code, start=0, count=800, fq=1))]
     fn get_security_bars_dataframe(
-        &self, py: Python<'_>, category: u8, market: u8, code: &str,
-        start: u32, count: u16, fq: u8,
+        &self,
+        py: Python<'_>,
+        category: u8,
+        market: u8,
+        code: &str,
+        start: u32,
+        count: u16,
+        fq: u8,
     ) -> PyResult<Py<PyAny>> {
-        let bars = self.client
-            .get_security_bars(category, market, code, start, count, fq)
+        let bars = self
+            .rt
+            .block_on(self.client.get_security_bars(category, market, code, start, count, fq))
             .map_err(to_py_err)?;
         crate::python::py_dataframe::security_bars_to_df(py, &bars)
     }
@@ -737,34 +748,47 @@ impl PyTdxHqClient {
     /// 获取指数K线, 返回 pandas DataFrame
     #[pyo3(signature = (category, market, code, start=0, count=800, fq=1))]
     fn get_index_bars_dataframe(
-        &self, py: Python<'_>, category: u8, market: u8, code: &str,
-        start: u32, count: u16, fq: u8,
+        &self,
+        py: Python<'_>,
+        category: u8,
+        market: u8,
+        code: &str,
+        start: u32,
+        count: u16,
+        fq: u8,
     ) -> PyResult<Py<PyAny>> {
-        let bars = self.client
-            .get_index_bars(category, market, code, start, count, fq)
+        let bars = self
+            .rt
+            .block_on(self.client.get_index_bars(category, market, code, start, count, fq))
             .map_err(to_py_err)?;
         crate::python::py_dataframe::index_bars_to_df(py, &bars)
     }
 
     /// 获取实时行情, 返回 pandas DataFrame
     fn get_security_quotes_dataframe(
-        &self, py: Python<'_>, all_stock: Vec<(u8, String)>,
+        &self,
+        py: Python<'_>,
+        all_stock: Vec<(u8, String)>,
     ) -> PyResult<Py<PyAny>> {
         let refs: Vec<(u8, &str)> = all_stock.iter().map(|(m, c)| (*m, c.as_str())).collect();
-        let quotes = self.client
-            .get_security_quotes(&refs)
+        let quotes = self
+            .rt
+            .block_on(self.client.get_security_quotes(&refs))
             .map_err(to_py_err)?;
         crate::python::py_dataframe::quotes_to_df(py, &quotes)
     }
 
     /// 获取多只股票的财务信息, 返回 pandas DataFrame
     fn get_finance_info_dataframe(
-        &self, py: Python<'_>, stocks: Vec<(u8, String)>,
+        &self,
+        py: Python<'_>,
+        stocks: Vec<(u8, String)>,
     ) -> PyResult<Py<PyAny>> {
         let mut infos = Vec::new();
         for (market, code) in &stocks {
-            let info = self.client
-                .get_finance_info(*market, code)
+            let info = self
+                .rt
+                .block_on(self.client.get_finance_info(*market, code))
                 .map_err(to_py_err)?;
             infos.push((info,));
         }

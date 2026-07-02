@@ -1,7 +1,7 @@
 # tdxrs — 通达信行情数据解析库
 
 [![Rust](https://img.shields.io/badge/Rust-1.83%2B-orange)](https://www.rust-lang.org/)
-[![Python](https://img.shields.io/badge/Python-3.8%2B-blue)](https://www.python.org/)
+[![Python](https://img.shields.io/badge/Python-3.11%2B-blue)](https://www.python.org/)
 [![pyo3](https://img.shields.io/badge/pyo3-0.28-green)](https://pyo3.rs/)
 [![License](https://img.shields.io/badge/license-MIT-brightgreen)](../../LICENSE)
 
@@ -26,13 +26,15 @@
 | 除权除息 | 分红 / 送股 / 配股 / 缩股历史 |
 | 板块数据 | 行业/概念/地域分类 |
 
-### 三种客户端方案
+### 五种客户端方案
 | 客户端 | 策略 | 场景 |
 |-------|------|------|
 | `TdxHqClient` | 连接池 (默认 5) + 心跳 + 重试 + 缓存 | 主力，顺序请求 |
 | `TdxDirectClient` | 每次独立 TCP 连接 | 偶发请求、高并发 |
 | `TdxFinanceClient` | 独立连接 + 超长超时 (15s) + 分片下载 | 大文件 gpcw 数据 |
-| `AsyncTdxHqClient` | tokio 异步 | 异步生态集成 |
+| `AsyncTdxHqClient` | tokio 异步 + Channel 连接池 | 异步生态集成 |
+| `TdxHqFundClient` | 基金专用 (净值/行情/申赎清单) | ETF/LOF/REITs |
+| `TdxBlockClient` | 板块专用 (列表/成分股) | 概念/行业/地域板块 |
 
 ### 复权处理
 客户端侧前复权/后复权，支持分红+送股+配股联动，自动补全早期除权事件上下文。详见 [复权算法](../ADJUSTER_ALGORITHM.md)。
@@ -55,6 +57,20 @@ maturin develop --release
 ```
 
 详细安装见 [INSTALL.md](../INSTALL.md)。
+
+### CLI 命令行
+
+无需编写代码，直接查询行情：
+
+```bash
+tdxrs quote 600519              # 实时行情
+tdxrs bars 600519 --count 30    # K线数据
+tdxrs trades 600519             # 逐笔成交
+tdxrs servers                   # 测试服务器连通性
+tdxrs download --market sh      # 批量下载
+```
+
+详见 [CLI 使用指南](CLI.md)。
 
 ### 网络行情
 
@@ -96,13 +112,17 @@ df = reader.to_dataframe(open("600519.day", "rb").read())
 tdxrs/
 ├── src/reader/         # 本地二进制文件解析 (日线/分钟线/板块/财务)
 ├── src/protocol/       # TDX 协议编解码 + 复权算法
-├── src/net/            # TCP 连接管理 (4 种客户端 + 公共工具)
+├── src/net/            # TCP 连接管理 (5 种客户端 + 公共工具)
+├── src/fund/           # 基金数据 (净值/行情/申赎清单)
+├── src/block/          # 板块数据 (列表/成分股)
+├── src/profile/        # F10 公司资料
 ├── src/python/         # PyO3 绑定 (Reader / Client / DataFrame / Constants)
 ├── src/logging.rs      # 轻量日志 (TDXRS_LOG 环境变量控制)
+├── src/error_codes.rs  # 错误码定义
 ├── docs/               # 项目文档
 ├── tests/              # 测试脚本 + 二进制测试数据
 ├── examples/           # 示例代码
-├── python/tdxrs/       # Python 包入口
+├── python/tdxrs/       # Python 包入口 + CLI
 └── benches/            # Benchmark
 ```
 
@@ -111,7 +131,7 @@ tdxrs/
 ## 环境要求
 
 - **Rust** 1.83+
-- **Python** 3.8+
+- **Python** 3.11+
 - **maturin** (`pip install maturin`)
 - Windows `x86_64-pc-windows-gnu` 额外需要 `dlltool.exe`（详见 [INSTALL.md](../INSTALL.md)）
 
@@ -122,9 +142,12 @@ tdxrs/
 | 文档 | 说明 |
 |------|------|
 | [API 参考](API_REFERENCE.md) | 完整 Python API 签名与参数说明 |
+| [CLI 使用指南](CLI.md) | 命令行工具用法 (quote/bars/trades/download) |
+| [基金模块](FUND.md) | ETF/LOF/REITs 数据接口 |
+| [F10 公司资料](F10.md) | 公司基本面数据 (需源码编译) |
 | [架构说明](ARCHITECTURE.md) | 模块设计、数据流、客户端策略 |
-| [复权算法](../ADJUSTER_ALGORITHM.md) | 公式推导、版本迭代、验证方法 |
 | [性能基准](BENCHMARKS.md) | 顺序/并发性能 + 方案选择指南 |
+| [复权算法](../ADJUSTER_ALGORITHM.md) | 公式推导、版本迭代、验证方法 |
 | [变更日志](CHANGELOG.md) | 版本历史 |
 | [贡献指南](CONTRIBUTING.md) | 参与开发 |
 

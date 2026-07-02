@@ -1,7 +1,8 @@
 use encoding_rs::GBK;
 
-use crate::constants::{read_u16, read_u32};
-use crate::error::{Result, TdxError};
+use crate::constants::{read_u16, read_u32, max_valid_year};
+use crate::error::Result;
+use crate::error_codes::ErrorCode;
 use crate::helpers::{get_price, get_volume};
 
 use super::types::*;
@@ -12,7 +13,7 @@ use super::types::*;
 
 pub fn parse_security_count(body: &[u8]) -> Result<u16> {
     if body.len() < 2 {
-        return Err(TdxError::ResponseParse("body too short for count".into()));
+        return Err(ErrorCode::RESPONSE_LENGTH_MISMATCH.err("body too short for count"));
     }
     Ok(read_u16(body, 0))
 }
@@ -23,7 +24,7 @@ pub fn parse_security_count(body: &[u8]) -> Result<u16> {
 
 pub fn parse_security_list(body: &[u8]) -> Result<Vec<SecurityInfo>> {
     if body.len() < 2 {
-        return Err(TdxError::ResponseParse("body too short".into()));
+        return Err(ErrorCode::RESPONSE_LENGTH_MISMATCH.err("body too short"));
     }
 
     let count = read_u16(body, 0) as usize;
@@ -87,7 +88,7 @@ pub fn parse_security_list(body: &[u8]) -> Result<Vec<SecurityInfo>> {
 
 pub fn parse_security_bars(body: &[u8], category: u8) -> Result<Vec<SecurityBar>> {
     if body.len() < 2 {
-        return Err(TdxError::ResponseParse("body too short".into()));
+        return Err(ErrorCode::RESPONSE_LENGTH_MISMATCH.err("body too short"));
     }
 
     let count = read_u16(body, 0) as usize;
@@ -118,6 +119,11 @@ pub fn parse_security_bars(body: &[u8], category: u8) -> Result<Vec<SecurityBar>
 
         // 日期时间
         let (year, month, day, hour, minute, new_pos) = get_datetime(category, body, pos);
+        // 校验日期合法性 — 服务器可能返回损坏数据或无效代码的垃圾数据
+        // 无效日期时截断返回已有结果，而非报错
+        if year < 1980 || year > max_valid_year() || month < 1 || month > 12 || day < 1 || day > 31 {
+            break;
+        }
         bar.year = year;
         bar.month = month;
         bar.day = day;
@@ -176,7 +182,7 @@ pub fn parse_security_bars(body: &[u8], category: u8) -> Result<Vec<SecurityBar>
 
 pub fn parse_index_bars(body: &[u8], category: u8) -> Result<Vec<IndexBar>> {
     if body.len() < 2 {
-        return Err(TdxError::ResponseParse("body too short".into()));
+        return Err(ErrorCode::RESPONSE_LENGTH_MISMATCH.err("body too short"));
     }
 
     let count = read_u16(body, 0) as usize;
@@ -208,6 +214,11 @@ pub fn parse_index_bars(body: &[u8], category: u8) -> Result<Vec<IndexBar>> {
 
         // 日期时间
         let (year, month, day, hour, minute, new_pos) = get_datetime(category, body, pos);
+        // 校验日期合法性 — 服务器可能返回损坏数据或无效代码的垃圾数据
+        // 无效日期时截断返回已有结果，而非报错
+        if year < 1980 || year > max_valid_year() || month < 1 || month > 12 || day < 1 || day > 31 {
+            break;
+        }
         bar.year = year;
         bar.month = month;
         bar.day = day;
@@ -269,20 +280,47 @@ pub fn parse_index_bars(body: &[u8], category: u8) -> Result<Vec<IndexBar>> {
 // 解析分时数据
 // ============================================================
 
+/// 根据分时数据索引计算时间字符串
+///
+/// TDX 分时数据每天 240 个点，开盘集合竞价视为无有效数据点:
+/// - 上午 120 个: 09:31 ~ 11:30 (index 0-119)，不含 09:30
+/// - 下午 120 个: 13:01 ~ 15:00 (index 120-239)，不含 13:00
+pub fn minute_time_from_index(index: usize) -> String {
+    let total = if index < 120 {
+        9 * 60 + 31 + index           // 09:31 + index → 09:31 ~ 11:30
+    } else {
+        13 * 60 + 1 + (index - 120)   // 13:01 + (index-120) → 13:01 ~ 15:00
+    };
+    format!("{:02}:{:02}", total / 60, total % 60)
+}
+
+/// 解析当日分时数据
+///
+/// ⚠️ 已知问题: TDX 实时分时 API (命令码 0x051d) 的数据格式与历史分时 API 不同，
+/// 且数据编码存在异常（价格差分编码在某些记录会重置）。
+///
+/// 建议使用 `get_history_minute_time_data` API 替代，传入今日日期即可获取当日数据，
+/// 该 API 数据格式稳定且已验证正确。
+///
+/// 当前实现基于逆向分析，头部偏移 13 字节，但部分场景下价格可能异常。
 pub fn parse_minute_time_data(body: &[u8], market: u8, code: &str) -> Result<Vec<MinuteTimePrice>> {
     let coefficient = super::types::get_security_coefficient(market, code);
 
-    if body.len() < 4 {
-        return Err(TdxError::ResponseParse("body too short".into()));
+    if body.len() < 14 {
+        return Err(ErrorCode::RESPONSE_LENGTH_MISMATCH.err("body too short"));
     }
 
     let count = read_u16(body, 0) as usize;
-    let mut pos = 4; // skip 2 bytes count + 2 bytes padding
+    // 实时分时数据头部: 2(count) + 2(padding) + 1(indicator) + 6(stock_code) + 2(unknown) = 13 bytes
+    // 注意: 此偏移量基于逆向分析，可能不完全准确
+    let mut pos = 13;
     let mut result = Vec::with_capacity(count);
 
     let mut pre_diff_base: i64 = 0;
+    let mut cum_amount: f64 = 0.0;
+    let mut cum_vol: f64 = 0.0;
 
-    for _ in 0..count {
+    for i in 0..count {
         let (price_diff, new_pos) = get_price(body, pos);
         pre_diff_base += price_diff;
         let price = (pre_diff_base as f64) * coefficient;
@@ -296,9 +334,17 @@ pub fn parse_minute_time_data(body: &[u8], market: u8, code: &str) -> Result<Vec
         let vol = vol_diff as f64;
         pos = new_pos;
 
-        result.push(MinuteTimePrice { price, vol });
+        // 均价 = 累计金额 / 累计成交量
+        cum_amount += price * vol;
+        cum_vol += vol;
+        let avg_price = if cum_vol > 0.0 { cum_amount / cum_vol } else { price };
+
+        let time = minute_time_from_index(i);
+        result.push(MinuteTimePrice { time, price, avg_price, vol });
     }
 
+    // 倒序排列：最新记录在前
+    result.reverse();
     Ok(result)
 }
 
@@ -318,8 +364,13 @@ pub fn parse_history_minute_time_data(
 
     let mut result = Vec::new();
     let mut pre_diff_base: i64 = 0;
+    let mut cum_amount: f64 = 0.0;
+    let mut cum_vol: f64 = 0.0;
+    let mut index: usize = 0;
 
-    while pos + 4 < body.len() {
+    // get_price 在越界时返回 (0, data.len())，不会 panic
+    while pos < body.len() {
+        let old_pos = pos;
         let (price_diff, new_pos) = get_price(body, pos);
         pre_diff_base += price_diff;
         let price = (pre_diff_base as f64) * coefficient;
@@ -333,9 +384,23 @@ pub fn parse_history_minute_time_data(
         let vol = vol_diff as f64;
         pos = new_pos;
 
-        result.push(MinuteTimePrice { price, vol });
+        // 防止无限循环 (get_price 越界时 pos 不变)
+        if pos == old_pos {
+            break;
+        }
+
+        // 均价 = 累计金额 / 累计成交量
+        cum_amount += price * vol;
+        cum_vol += vol;
+        let avg_price = if cum_vol > 0.0 { cum_amount / cum_vol } else { price };
+
+        let time = minute_time_from_index(index);
+        result.push(MinuteTimePrice { time, price, avg_price, vol });
+        index += 1;
     }
 
+    // 倒序排列：最新记录在前
+    result.reverse();
     Ok(result)
 }
 
@@ -344,8 +409,12 @@ pub fn parse_history_minute_time_data(
 // ============================================================
 
 pub fn parse_transaction_data(body: &[u8]) -> Result<Vec<TickData>> {
+    parse_transaction_data_with_coefficient(body, 0.01)
+}
+
+pub fn parse_transaction_data_with_coefficient(body: &[u8], coefficient: f64) -> Result<Vec<TickData>> {
     if body.len() < 2 {
-        return Err(TdxError::ResponseParse("body too short".into()));
+        return Err(ErrorCode::RESPONSE_LENGTH_MISMATCH.err("body too short"));
     }
 
     let count = read_u16(body, 0) as usize;
@@ -365,7 +434,7 @@ pub fn parse_transaction_data(body: &[u8]) -> Result<Vec<TickData>> {
         // price (delta encoded)
         let (price_diff, new_pos) = get_price(body, pos);
         last_price += price_diff;
-        let price = last_price as f64 / 100.0;
+        let price = last_price as f64 * coefficient;
         pos = new_pos;
 
         // vol
@@ -383,8 +452,9 @@ pub fn parse_transaction_data(body: &[u8]) -> Result<Vec<TickData>> {
         let buyorsell = buyorsell as u32;
         pos = new_pos;
 
-        // extra field (skipped in Python)
-        let (_, new_pos) = get_price(body, pos);
+        // reserved (原 extra field，具体含义待确认)
+        let (reserved, new_pos) = get_price(body, pos);
+        let reserved = reserved as u32;
         pos = new_pos;
 
         result.push(TickData {
@@ -393,6 +463,7 @@ pub fn parse_transaction_data(body: &[u8]) -> Result<Vec<TickData>> {
             vol,
             num,
             buyorsell,
+            reserved,
         });
     }
 
@@ -404,8 +475,12 @@ pub fn parse_transaction_data(body: &[u8]) -> Result<Vec<TickData>> {
 // ============================================================
 
 pub fn parse_history_transaction_data(body: &[u8]) -> Result<Vec<TickData>> {
+    parse_history_transaction_data_with_coefficient(body, 0.01)
+}
+
+pub fn parse_history_transaction_data_with_coefficient(body: &[u8], coefficient: f64) -> Result<Vec<TickData>> {
     if body.len() < 6 {
-        return Err(TdxError::ResponseParse("body too short".into()));
+        return Err(ErrorCode::RESPONSE_LENGTH_MISMATCH.err("body too short"));
     }
 
     // 跳过 2 bytes count + 4 bytes header
@@ -425,7 +500,7 @@ pub fn parse_history_transaction_data(body: &[u8]) -> Result<Vec<TickData>> {
         // price (delta encoded)
         let (price_diff, new_pos) = get_price(body, pos);
         last_price += price_diff;
-        let price = last_price as f64 / 100.0;
+        let price = last_price as f64 * coefficient;
         pos = new_pos;
 
         // vol
@@ -438,8 +513,9 @@ pub fn parse_history_transaction_data(body: &[u8]) -> Result<Vec<TickData>> {
         let buyorsell = buyorsell as u32;
         pos = new_pos;
 
-        // extra field (skipped in Python)
-        let (_, new_pos) = get_price(body, pos);
+        // reserved (原 extra field，具体含义待确认)
+        let (reserved, new_pos) = get_price(body, pos);
+        let reserved = reserved as u32;
         pos = new_pos;
 
         result.push(TickData {
@@ -448,6 +524,7 @@ pub fn parse_history_transaction_data(body: &[u8]) -> Result<Vec<TickData>> {
             vol,
             num: 0,
             buyorsell,
+            reserved,
         });
     }
 
@@ -460,7 +537,7 @@ pub fn parse_history_transaction_data(body: &[u8]) -> Result<Vec<TickData>> {
 
 pub fn parse_security_quotes(body: &[u8]) -> Result<Vec<SecurityQuote>> {
     if body.len() < 4 {
-        return Err(TdxError::ResponseParse("body too short".into()));
+        return Err(ErrorCode::RESPONSE_LENGTH_MISMATCH.err("body too short"));
     }
 
     let mut pos = 0;
@@ -671,7 +748,7 @@ pub fn parse_finance_info(body: &[u8], market: u8, code: &str) -> Result<Finance
     // Python skips: 2 bytes count + 1 byte market + 6 bytes code = 9 bytes
     // Struct: fHHII + 30*f = 136 bytes
     if body.len() < 9 + 136 {
-        return Err(TdxError::ResponseParse("body too short for finance info".into()));
+        return Err(ErrorCode::RESPONSE_LENGTH_MISMATCH.err("body too short for finance info"));
     }
 
     let mut pos = 9; // skip count(2) + market(1) + code(6)
@@ -751,7 +828,7 @@ pub fn parse_finance_info(body: &[u8], market: u8, code: &str) -> Result<Finance
 pub fn parse_xdxr_info(body: &[u8]) -> Result<Vec<XdXrInfo>> {
     // Python: pos=0, pos+=9 (skip 9 bytes), read count at pos=9
     if body.len() < 11 {
-        return Err(TdxError::ResponseParse("body too short".into()));
+        return Err(ErrorCode::RESPONSE_LENGTH_MISMATCH.err("body too short"));
     }
 
     let mut pos = 9;
@@ -865,7 +942,7 @@ pub fn parse_xdxr_info(body: &[u8]) -> Result<Vec<XdXrInfo>> {
 
 pub fn parse_block_info_meta(body: &[u8]) -> Result<BlockInfoMeta> {
     if body.len() < 38 {
-        return Err(TdxError::ResponseParse("body too short for block meta".into()));
+        return Err(ErrorCode::RESPONSE_LENGTH_MISMATCH.err("body too short for block meta"));
     }
 
     let size = read_u32(body, 0);
@@ -1065,7 +1142,10 @@ mod tests {
 
     #[test]
     fn test_minute_time_zero_count() {
-        let result = parse_minute_time_data(&[0x00, 0x00, 0x00, 0x00], 1, "600519").unwrap();
+        // 头部: 2(count) + 2(padding) + 1(indicator) + 6(stock_code) + 2(unknown) = 13 bytes
+        // 需要至少 14 字节 (13 头部 + 1 数据)
+        let body = [0x00, 0x00, 0x00, 0x00, 0x01, 0x36, 0x30, 0x30, 0x35, 0x31, 0x39, 0x00, 0x00, 0x00];
+        let result = parse_minute_time_data(&body, 1, "600519").unwrap();
         assert!(result.is_empty());
     }
 
@@ -1174,8 +1254,8 @@ mod tests {
 
     #[test]
     fn test_xdxr_zero_count() {
-        // 9 bytes header + 2 bytes count=0
-        let mut data = vec![0u8; 11];
+        /* 9 bytes header + 2 bytes count=0 */
+        let data = vec![0u8; 11];
         let result = parse_xdxr_info(&data).unwrap();
         assert!(result.is_empty());
     }

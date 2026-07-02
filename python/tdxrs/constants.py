@@ -33,6 +33,9 @@ from tdxrs._internal import (  # noqa: F401
     DEFAULT_PORT,
     DEFAULT_POOL_SIZE,
     FQ_PRICE_PRECISION,
+    # 别名
+    PORT,
+    POOL_SIZE,
     # 板块文件
     BLOCK_SZ,
     BLOCK_FG,
@@ -50,4 +53,5 @@ __all__ = [
     "MAX_KLINE_COUNT", "MAX_TRANSACTION_COUNT",
     "DEFAULT_PORT", "DEFAULT_POOL_SIZE", "FQ_PRICE_PRECISION",
     "BLOCK_SZ", "BLOCK_FG", "BLOCK_GN", "BLOCK_DEFAULT",
+    "PORT", "POOL_SIZE",
 ]

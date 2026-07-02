@@ -8,7 +8,7 @@
 use flate2::read::ZlibDecoder;
 use std::io::Read;
 
-use crate::error::{Result, TdxError};
+use crate::error::Result;
 use crate::net::connection::TcpConnection;
 use crate::net::packet::{ResponseHeader, RSP_HEADER_LEN};
 use crate::net::utils;
@@ -16,6 +16,7 @@ use crate::profile::constants::*;
 use crate::profile::parser::{parse_company_info_category, parse_company_info_content};
 use crate::profile::types::*;
 use crate::protocol::constants::{MARKET_SH, MARKET_SZ};
+use crate::{loge};
 
 /// F10 客户端默认超时 (秒)
 const DEFAULT_F10_TIMEOUT: f64 = 10.0;
@@ -71,7 +72,11 @@ impl TdxF10Client {
     // ============================================================
 
     fn send_and_recv(&self, packet: &[u8]) -> Result<Vec<u8>> {
-        let mut conn = TcpConnection::connect(&self.ip, self.port, self.timeout)?;
+        let mut conn = TcpConnection::connect(&self.ip, self.port, self.timeout)
+            .map_err(|e| {
+                loge!("f10", "connect to {}:{} failed: {}", self.ip, self.port, e);
+                e
+            })?;
         utils::perform_handshake(&mut conn)?;
 
         conn.send(packet)?;
@@ -88,14 +93,14 @@ impl TdxF10Client {
         }
 
         if body_buf.is_empty() {
-            return Err(TdxError::Disconnected);
+            return Err(crate::error_codes::ErrorCode::DISCONNECTED.err("empty response body"));
         }
 
         if header.zip_size != header.unzip_size {
             let mut decoder = ZlibDecoder::new(&body_buf[..]);
             let mut decompressed = Vec::new();
             decoder.read_to_end(&mut decompressed).map_err(|e| {
-                TdxError::ResponseParse(format!("zlib decompress: {}", e))
+                crate::error_codes::ErrorCode::DECOMPRESS_FAILED.err(format!("{}", e))
             })?;
             Ok(decompressed)
         } else {
@@ -115,18 +120,16 @@ impl TdxF10Client {
     pub fn get_category(&self, market: u8, code: &str) -> Result<Vec<F10Category>> {
         // 验证市场代码
         if market != MARKET_SZ && market != MARKET_SH {
-            return Err(TdxError::InvalidData(format!(
-                "无效的市场代码: {} (仅支持 0=SZ, 1=SH)",
-                market
-            )));
+            return Err(crate::error_codes::ErrorCode::ARGUMENT_OUT_OF_RANGE.err(
+                format!("无效的市场代码: {} (仅支持 0=SZ, 1=SH)", market)
+            ));
         }
 
         // 验证股票代码
         if code.len() != 6 {
-            return Err(TdxError::InvalidData(format!(
-                "无效的股票代码: {} (必须为 6 位数字)",
-                code
-            )));
+            return Err(crate::error_codes::ErrorCode::INVALID_STOCK_CODE.err(
+                format!("{} (必须为 6 位数字)", code)
+            ));
         }
 
         // 构建请求包
@@ -168,18 +171,16 @@ impl TdxF10Client {
     ) -> Result<F10Content> {
         // 验证市场代码
         if market != MARKET_SZ && market != MARKET_SH {
-            return Err(TdxError::InvalidData(format!(
-                "无效的市场代码: {} (仅支持 0=SZ, 1=SH)",
-                market
-            )));
+            return Err(crate::error_codes::ErrorCode::ARGUMENT_OUT_OF_RANGE.err(
+                format!("无效的市场代码: {} (仅支持 0=SZ, 1=SH)", market)
+            ));
         }
 
         // 验证股票代码
         if code.len() != 6 {
-            return Err(TdxError::InvalidData(format!(
-                "无效的股票代码: {} (必须为 6 位数字)",
-                code
-            )));
+            return Err(crate::error_codes::ErrorCode::INVALID_STOCK_CODE.err(
+                format!("{} (必须为 6 位数字)", code)
+            ));
         }
 
         // 构建请求包
@@ -249,7 +250,7 @@ impl TdxF10Client {
             .iter()
             .find(|c| c.name == name)
             .ok_or_else(|| {
-                TdxError::InvalidData(format!(
+                crate::error_codes::ErrorCode::MISSING_FIELD.err(format!(
                     "未找到分类 '{}'，可用分类: {}",
                     name,
                     categories
@@ -280,7 +281,7 @@ impl TdxF10Client {
             match self.get_content(market, code, category) {
                 Ok(content) => contents.push(content),
                 Err(e) => {
-                    eprintln!("获取分类 '{}' 失败: {}", category.name, e);
+                    loge!("f10", "获取分类 '{}' 失败: {}", category.name, e);
                 }
             }
         }

@@ -1,4 +1,5 @@
-use crate::error::{Result, TdxError};
+use crate::error::Result;
+use crate::error_codes::ErrorCode;
 
 /// Response header: 16 bytes little-endian <IIIHH
 /// (seq, method, _, zip_size, unzip_size)
@@ -15,7 +16,9 @@ pub const RSP_HEADER_LEN: usize = 16;
 impl ResponseHeader {
     pub fn parse(buf: &[u8]) -> Result<Self> {
         if buf.len() < RSP_HEADER_LEN {
-            return Err(TdxError::ResponseParse("header too short".into()));
+            return Err(ErrorCode::RESPONSE_HEADER_INVALID.err(
+                format!("expected {} bytes, got {}", RSP_HEADER_LEN, buf.len())
+            ));
         }
         // <IIIHH: seq(u32), method(u32), _(u32), zip_size(u16), unzip_size(u16)
         let seq = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);

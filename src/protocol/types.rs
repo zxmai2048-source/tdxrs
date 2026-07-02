@@ -110,7 +110,9 @@ pub struct SecurityInfo {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct MinuteTimePrice {
+    pub time: String,
     pub price: f64,
+    pub avg_price: f64,
     pub vol: f64,
 }
 
@@ -125,6 +127,8 @@ pub struct TickData {
     pub vol: f64,
     pub num: u32,
     pub buyorsell: u32,
+    /// 保留字段 (原 extra field，具体含义待确认)
+    pub reserved: u32,
 }
 
 // ============================================================
@@ -209,23 +213,46 @@ pub struct BlockInfoMeta {
 // 证券类型和系数
 // ============================================================
 
+/// 获取证券类型
+///
+/// 返回值:
+/// - 0: 指数
+/// - 1: A股
+/// - 2: B股
+/// - 3: 场内基金 (ETF/LOF/REITs)
+/// - 4: 债券
+/// - 5: 场外基金 (传统开放式基金)
+///
+/// 沪市代码分类规则:
+/// - 60/68: A股
+/// - 90: B股
+/// - 519: 场外基金 (必须在 50/51 之前检查)
+/// - 50/51/58: 场内基金
+/// - 11/13: 债券
+/// - 000: 指数
 pub fn get_security_type(market: u8, code: &str) -> u8 {
     if market == 1 {
         // 上海
-        if code.starts_with('5') {
-            return 0; // 指数
-        }
         if code.starts_with("60") || code.starts_with("68") {
             return 1; // A股
         }
         if code.starts_with("90") {
             return 2; // B股
         }
-        if code.starts_with("51") {
+        // 场外基金: 传统开放式基金 (519xxx) - 必须在场内基金之前检查
+        if code.starts_with("519") {
+            return 5; // 场外基金
+        }
+        // 场内基金: ETF/LOF/REITs (50xxx, 51xxx, 58xxx)
+        if code.starts_with("50") || code.starts_with("51") || code.starts_with("58") {
             return 3; // 基金
         }
         if code.starts_with("11") || code.starts_with("13") {
             return 4; // 债券
+        }
+        // 上证指数: 000001, 000300 等
+        if code.starts_with("000") {
+            return 0; // 指数
         }
     } else if market == 0 {
         // 深圳
@@ -249,14 +276,24 @@ pub fn get_security_type(market: u8, code: &str) -> u8 {
 }
 
 /// 获取价格系数
+///
+/// 不同证券类型使用不同的价格系数:
+/// - 指数/A股: 0.01 (2位小数)
+/// - B股: 0.001 (3位小数)
+/// - 场内基金 (ETF/LOF/REITs): 0.001 (3位小数)
+/// - 债券: 0.0001 (4位小数)
+/// - 场外基金 (传统开放式基金): 0.00001 (5位小数)
+///
+/// 注意: 场外基金 (519xxx) 返回的是单位净值，不是累积净值
 pub fn get_security_coefficient(market: u8, code: &str) -> f64 {
     let sec_type = get_security_type(market, code);
     match sec_type {
-        0 => 0.01,  // 指数
-        1 => 0.01,  // A股
-        2 => 0.001, // B股
-        3 => 0.001, // 基金
-        4 => 0.0001, // 债券
+        0 => 0.01,    // 指数
+        1 => 0.01,    // A股
+        2 => 0.001,   // B股
+        3 => 0.001,   // 场内基金 (ETF/LOF/REITs)
+        4 => 0.0001,  // 债券
+        5 => 0.00001, // 场外基金 (传统开放式基金)
         _ => 0.01,
     }
 }

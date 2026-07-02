@@ -4,6 +4,7 @@ use crate::error::Result;
 use crate::net::client::TdxHqClient;
 use crate::net::utils::{auto_market, encode_gbk, encode_gbk_padded};
 use crate::protocol::constants::{MARKET_SH, MARKET_SZ};
+use crate::loge;
 use super::constants::*;
 use super::parser::*;
 use super::types::*;
@@ -241,7 +242,7 @@ impl<'a> ProfileClient<'a> {
             match self.get_content(market, code, category) {
                 Ok(content) => contents.push(content),
                 Err(e) => {
-                    eprintln!("获取分类 '{}' 失败: {}", category.name, e);
+                    loge!("profile", "获取分类 '{}' 失败: {}", category.name, e);
                 }
             }
         }

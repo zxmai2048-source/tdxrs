@@ -1,5 +1,7 @@
 use thiserror::Error;
 
+use crate::error_codes::{CodedError, ErrorCode};
+
 #[derive(Error, Debug)]
 pub enum TdxError {
     #[error("IO error: {0}")]
@@ -31,6 +33,40 @@ pub enum TdxError {
 
     #[error("Retry exhausted after {0} attempts")]
     RetryExhausted(usize),
+
+    #[error("{0}")]
+    Coded(CodedError),
+}
+
+impl TdxError {
+    /// 创建带错误码的错误
+    pub fn coded(code: ErrorCode, message: impl Into<String>) -> Self {
+        TdxError::Coded(CodedError::new(code, message))
+    }
+
+    /// 获取错误码 (如果有)
+    pub fn error_code(&self) -> Option<ErrorCode> {
+        match self {
+            TdxError::Coded(e) => Some(e.code),
+            _ => None,
+        }
+    }
+
+    /// 格式化为用户友好的错误信息 (包含错误码)
+    pub fn format_coded(&self) -> String {
+        match self {
+            TdxError::Coded(e) => e.format(),
+            _ => self.to_string(),
+        }
+    }
+
+    /// 格式化为中文错误信息 (包含错误码)
+    pub fn format_coded_zh(&self) -> String {
+        match self {
+            TdxError::Coded(e) => e.format_zh(),
+            _ => self.to_string(),
+        }
+    }
 }
 
 pub type Result<T> = std::result::Result<T, TdxError>;

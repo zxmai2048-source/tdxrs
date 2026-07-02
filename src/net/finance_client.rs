@@ -25,13 +25,14 @@ use std::io::Read;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
-use crate::error::{Result, TdxError};
+use crate::error::Result;
 use crate::net::connection::TcpConnection;
 use crate::net::packet::{ResponseHeader, RSP_HEADER_LEN};
 use crate::net::utils;
 use crate::protocol::parsers::*;
 use crate::protocol::types::*;
 use crate::reader::financial::{parse_financial, FinancialRecord};
+use crate::{loge, logi, logw};
 
 /// 财务数据客户端默认超时 (秒)
 const DEFAULT_FINANCE_TIMEOUT: f64 = 15.0;
@@ -121,7 +122,11 @@ impl TdxFinanceClient {
     // ============================================================
 
     fn send_and_recv(&self, packet: &[u8]) -> Result<Vec<u8>> {
-        let mut conn = TcpConnection::connect(&self.ip, self.port, self.timeout)?;
+        let mut conn = TcpConnection::connect(&self.ip, self.port, self.timeout)
+            .map_err(|e| {
+                loge!("finance", "connect to {}:{} failed: {}", self.ip, self.port, e);
+                e
+            })?;
         utils::perform_handshake(&mut conn)?;
 
         conn.send(packet)?;
@@ -138,14 +143,14 @@ impl TdxFinanceClient {
         }
 
         if body_buf.is_empty() {
-            return Err(TdxError::Disconnected);
+            return Err(crate::error_codes::ErrorCode::DISCONNECTED.err("empty response body"));
         }
 
         if header.zip_size != header.unzip_size {
             let mut decoder = ZlibDecoder::new(&body_buf[..]);
             let mut decompressed = Vec::new();
             decoder.read_to_end(&mut decompressed).map_err(|e| {
-                TdxError::ResponseParse(format!("zlib decompress: {}", e))
+                crate::error_codes::ErrorCode::DECOMPRESS_FAILED.err(format!("{}", e))
             })?;
             Ok(decompressed)
         } else {
@@ -225,6 +230,7 @@ impl TdxFinanceClient {
     ) -> Result<Vec<u8>> {
         // 1. 检查磁盘缓存
         if let Some(cached) = self.cache_get(filename) {
+            logi!("finance", "cache hit: {}", filename);
             return Ok(cached);
         }
 
@@ -321,9 +327,10 @@ impl TdxFinanceClient {
                 return Ok(crate::protocol::finance_fields::extract_indicators(&r.fields));
             }
         }
-        Err(TdxError::ResponseParse(format!(
-            "stock {} not found in {}", code, filename
-        )))
+        logw!("finance", "stock {} not found in {}", code, filename);
+        Err(crate::error_codes::ErrorCode::INVALID_STOCK_CODE.err(
+            format!("stock {} not found in {}", code, filename)
+        ))
     }
 
     /// 获取单只股票的命名财务指标 (带中文标签, 适合展示/校验)
@@ -339,9 +346,10 @@ impl TdxFinanceClient {
                 return Ok(crate::protocol::finance_fields::extract_with_labels(&r.fields));
             }
         }
-        Err(TdxError::ResponseParse(format!(
-            "stock {} not found in {}", code, filename
-        )))
+        logw!("finance", "stock {} not found in {}", code, filename);
+        Err(crate::error_codes::ErrorCode::INVALID_STOCK_CODE.err(
+            format!("stock {} not found in {}", code, filename)
+        ))
     }
 }
 

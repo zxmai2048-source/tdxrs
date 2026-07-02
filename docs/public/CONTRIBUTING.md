@@ -12,6 +12,27 @@
 - 网络相关问题提供服务器 IP/端口、请求参数
 - 提供最小可复现示例
 
+### 数据准确性反馈
+
+数据准确性是 tdxrs 的核心关注点，但由于 TDX 协议的复杂性和逆向工程的局限性，**部分数据的准确性无法完全保证**。
+
+如果你在使用过程中发现以下问题，请及时反馈：
+- 价格解析错误（如涨跌幅异常、价格精度问题）
+- 成交量/成交额计算偏差
+- 时间映射错误（分时数据时间点不对应）
+- 复权计算结果与交易软件不一致
+- 逐笔成交数据异常
+
+**反馈格式建议**：
+```
+问题描述: 简要说明发现的问题
+股票代码: 600519
+数据类型: 分时/逐笔/K线/行情
+预期结果: 交易软件显示的数据
+实际结果: tdxrs 返回的数据
+复现代码: 最小可复现的代码片段
+```
+
 ---
 
 ## 开发环境
@@ -35,7 +56,7 @@ cargo test --lib
 python tests/compare_tdxpy_tdxrs.py --mode reader
 ```
 
-环境要求: Rust 1.83+, Python 3.8+。
+环境要求: Rust 1.83+, Python 3.11+。
 Windows `x86_64-pc-windows-gnu` 需要安装 MSYS2 dlltool (详见 [INSTALL.md](../INSTALL.md))。
 
 ---
@@ -45,48 +66,25 @@ Windows `x86_64-pc-windows-gnu` 需要安装 MSYS2 dlltool (详见 [INSTALL.md](
 ```
 src/
 ├── reader/        # 本地文件解析器 (日线/分钟线/板块/财务)
-│   └── financial.rs   # gpcw 格式 + 命名字段
-├── protocol/      # TDX 协议
-│   ├── parsers.rs     # 11 个响应解析器
-│   ├── adjuster.rs    # 复权调整算法
-│   ├── types.rs       # 数据结构定义
-│   ├── constants.rs   # 协议常量 (命令码/市场代码等)
-│   └── finance_fields.rs # gpcw 字段映射
-├── net/           # 网络客户端
-│   ├── client.rs         # TdxHqClient (连接池+心跳+重试)
-│   ├── direct_client.rs  # TdxDirectClient (裸连接)
-│   ├── finance_client.rs # TdxFinanceClient (独立财务)
-│   ├── f10_client.rs     # TdxF10Client (独立连接)
-│   ├── async_client.rs   # AsyncTdxHqClient (tokio)
-│   ├── utils.rs          # 公共工具 (握手/解压/auto_market/encode_gbk)
-│   ├── pool.rs           # 连接池
-│   ├── connection.rs     # 同步 TCP
-│   ├── async_connection.rs # 异步 TCP
-│   └── packet.rs         # 响应头解析
-├── etf/           # ETF 扩展模块
-│   ├── client.rs         # TdxHqEtfClient (封装 TdxHqClient)
-│   ├── constants.rs      # ETF 常量 (代码前缀, 复用 protocol 市场代码)
-│   ├── types.rs          # ETF 数据类型
-│   └── utils.rs          # ETF 代码验证
-├── profile/       # F10 扩展模块 (需 --features f10)
-│   ├── client.rs         # ProfileClient (共享连接池变体)
-│   ├── constants.rs      # 协议常量、分类名称
-│   ├── types.rs          # F10 数据类型
-│   ├── parser.rs         # 二进制响应解析器
-│   └── parser_f10.rs     # F10 文本解析器 (结构化提取)
+├── protocol/      # TDX 协议 (parsers/adjuster/types/constants)
+├── net/           # 网络客户端 (client/direct_client/async_client)
+├── fund/          # 基金模块 (ETF/LOF/REITs)
+├── block/         # 板块查询模块
+├── profile/       # F10 扩展模块
 ├── python/        # PyO3 Python 绑定
-│   ├── py_client.rs      # TdxHqClient 绑定
-│   ├── py_direct_client.rs # TdxDirectClient 绑定
-│   ├── py_reader.rs      # Reader 绑定
-│   ├── py_etf.rs         # TdxHqEtfClient 绑定
-│   ├── py_profile.rs     # TdxF10Client 绑定
-│   ├── py_dataframe.rs   # DataFrame 构建
-│   └── py_constants.rs   # 常量注册
-├── logging.rs     # 轻量日志 (TDXRS_LOG 控制)
-├── helpers.rs     # TDX 协议辅助 (变长整数)
+├── error_codes.rs # 统一错误码体系
 ├── constants.rs   # 日期/字节解码工具
+├── helpers.rs     # TDX 协议辅助 (变长整数)
 ├── error.rs       # 错误类型
 └── lib.rs         # PyO3 模块入口
+
+python/tdxrs/
+├── __init__.py    # 入口 (TdxHqClient, Reader 等)
+├── constants.py   # 常量子模块
+├── downloader.py  # 批量下载器 (多服务器轮转/增量更新)
+├── cli.py         # CLI 命令行工具
+├── cli_format.py  # CLI 输出格式化 (table/json/csv)
+└── __main__.py    # python -m tdxrs 入口
 ```
 
 ---
@@ -158,18 +156,15 @@ python tests/compare_tdxpy_tdxrs.py --mode network
 
 | 事项 | 说明 | 预估 |
 |------|------|------|
-| 异步连接池 | `AsyncTdxHqClient` 当前单连接，高并发退化严重。需 tokio 异步连接池，性能对标 `TdxDirectClient` | 2-3 天 |
-| 连接池优化 | 减少 `borrow()` 持锁时间：新建连接时先释放锁再做 I/O，或使用无锁结构 | 1 天 |
-| CI/CD | GitHub Actions: `cargo check` + `cargo test` + `maturin build` + wheel 发布 | 1 天 |
-| 多平台 wheel | Linux (manylinux) / macOS / Windows wheel 自动构建 | 1 天 |
+| 数据准确性验证 | 建立系统化的数据验证框架，对比主流交易软件数据 | 3-5 天 |
 
 ### P2 — 中优先级
 
 | 事项 | 说明 | 预估 |
 |------|------|------|
-| 磁盘缓存 | 历史 K 线 / 证券列表本地缓存，减少重复网络请求 | 2 天 |
-| 异步 Python 绑定 | `pyo3-asyncio` 暴露为 Python `async/await` API | 1-2 天 |
-| Data export | CSV / Parquet 导出，支持 pandas 直读 | 1-2 天 |
+| 磁盘缓存 (K 线) | 历史 K 线 / 证券列表本地缓存，减少重复网络请求 (财务数据缓存已实现) | 2 天 |
+| 异步 Python async/await | 当前 `PyAsyncTdxHqClient` 通过 `block_on()` 同步调用，暴露原生 `async/await` API | 1-2 天 |
+| 北交所支持 | 完善 market=2 (BJ) 的证券类型识别 | 1 天 |
 
 ### P3 — 低优先级
 

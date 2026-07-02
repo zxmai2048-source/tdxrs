@@ -4,13 +4,218 @@
 
 use flate2::read::ZlibDecoder;
 use std::io::Read;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
-use crate::error::{Result, TdxError};
+use crate::error::Result;
 use crate::net::connection::TcpConnection;
 use crate::net::packet::{ResponseHeader, RSP_HEADER_LEN};
 use crate::protocol::constants::*;
 use crate::protocol::parsers::parse_security_bars;
 use crate::protocol::types::{SecurityBar, XdXrInfo};
+
+// ================================================================
+// 交易阶段检测
+// ================================================================
+
+/// 交易阶段 (简化判断: 不考量假期, 午休视为交易中)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TradingPhase {
+    /// 交易时段 (工作日 9:30-15:00)
+    Trading,
+    /// 盘前/盘后 (工作日非交易时段)
+    PrePost,
+    /// 休市 (周末)
+    Closed,
+}
+
+/// 限流分档乘数: (日K乘数, 分时乘数)
+const PHASE_MULTIPLIER: [(f64, f64); 3] = [
+    (1.0, 1.0),   // Trading: 保持基础限流
+    (2.0, 1.5),   // PrePost: 放宽
+    (4.0, 3.0),   // Closed:  大幅放宽
+];
+
+/// 检测当前交易阶段
+pub fn detect_trading_phase() -> TradingPhase {
+    use std::time::SystemTime;
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    // 简化: UTC+8, 86400s/day, 604800s/week
+    // epoch 1970-01-01 是周四 (day 4)
+    let day_sec = now % 86400;
+    let week_day = ((now / 86400 + 4) % 7) as u8; // 0=Sun, 1=Mon, ..., 6=Sat
+
+    // 周末
+    if week_day == 0 || week_day == 6 {
+        return TradingPhase::Closed;
+    }
+
+    // UTC+8: 9:30 = 1:30 UTC = 5400s, 15:00 = 7:00 UTC = 25200s
+    if day_sec >= 5400 && day_sec <= 25200 {
+        TradingPhase::Trading
+    } else {
+        TradingPhase::PrePost
+    }
+}
+
+/// 获取今日日期 (YYYYMMDD 格式)
+///
+/// 用于 `get_minute_time_data` 委托给 `get_history_minute_time_data`，
+/// 避免实时分时 API (0x051d) 的价格编码异常。
+pub fn today_yyyymmdd() -> u32 {
+    use std::time::SystemTime;
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    // UTC+8 时区偏移
+    let ts = now + 8 * 3600;
+    let days = ts / 86400;
+    // 从 epoch 天数计算年月日 (简化算法)
+    let mut y = 1970;
+    let mut remaining = days;
+    loop {
+        let days_in_year = if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) {
+            366
+        } else {
+            365
+        };
+        if remaining < days_in_year {
+            break;
+        }
+        remaining -= days_in_year;
+        y += 1;
+    }
+    let leap = y % 4 == 0 && (y % 100 != 0 || y % 400 == 0);
+    let month_days: [u64; 12] = [
+        31,
+        if leap { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
+    let mut m = 0u32;
+    for &d in &month_days {
+        if remaining < d {
+            break;
+        }
+        remaining -= d;
+        m += 1;
+    }
+    let d = remaining + 1;
+    (y as u32) * 10000 + (m + 1) * 100 + d as u32
+}
+
+// ================================================================
+// 请求限流器
+// ================================================================
+
+/// 最大允许的请求速率 (req/s)
+const MAX_RATE_LIMIT: u32 = 200;
+
+/// 请求速率限制器
+///
+/// 通过最小请求间隔实现限流。上限 200 req/s。
+/// 支持交易阶段自动调整: 交易时段保守，休市时段放宽。
+pub struct RateLimiter {
+    enabled: AtomicBool,
+    inner: Mutex<RateLimiterInner>,
+}
+
+struct RateLimiterInner {
+    /// 基准最小间隔 (用户设定)
+    base_interval: Duration,
+    /// 当前生效的最小间隔 (根据阶段调整)
+    min_interval: Duration,
+    last_request: Option<Instant>,
+    phase: TradingPhase,
+}
+
+impl RateLimiter {
+    pub fn new(min_interval_ms: u64) -> Self {
+        let base = Duration::from_millis(min_interval_ms);
+        Self {
+            enabled: AtomicBool::new(min_interval_ms > 0),
+            inner: Mutex::new(RateLimiterInner {
+                base_interval: base,
+                min_interval: base,
+                last_request: None,
+                phase: TradingPhase::Trading,
+            }),
+        }
+    }
+
+    /// 等待直到可以发送下一个请求
+    pub fn wait(&self) {
+        if !self.enabled.load(Ordering::Relaxed) {
+            return;
+        }
+        let mut inner = self.inner.lock().unwrap();
+        if let Some(last) = inner.last_request {
+            let elapsed = last.elapsed();
+            if elapsed < inner.min_interval {
+                std::thread::sleep(inner.min_interval - elapsed);
+            }
+        }
+        inner.last_request = Some(Instant::now());
+    }
+
+    /// 设置每秒请求数 (0 = 禁用, 超过 200 自动降为 200)
+    pub fn set_rps(&self, rps: u32) {
+        let mut inner = self.inner.lock().unwrap();
+        if rps == 0 {
+            self.enabled.store(false, Ordering::Relaxed);
+        } else {
+            let capped = rps.min(MAX_RATE_LIMIT);
+            inner.base_interval = Duration::from_millis(1000 / capped as u64);
+            // 重新应用当前阶段的乘数
+            let mult = PHASE_MULTIPLIER[inner.phase as usize].0;
+            let adjusted_ms = (inner.base_interval.as_millis() as f64 / mult) as u64;
+            inner.min_interval = Duration::from_millis(adjusted_ms.max(1));
+            self.enabled.store(true, Ordering::Relaxed);
+        }
+    }
+
+    pub fn set_enabled(&self, enabled: bool) {
+        self.enabled.store(enabled, Ordering::Relaxed);
+    }
+
+    /// 设置交易阶段，自动调整限流强度
+    ///
+    /// - `Trading`: 使用基准限流 (最保守)
+    /// - `PrePost`: 基准限流 / 2
+    /// - `Closed`:  基准限流 / 4
+    pub fn set_phase(&self, phase: TradingPhase) {
+        let mut inner = self.inner.lock().unwrap();
+        let mult = PHASE_MULTIPLIER[phase as usize].0;
+        let adjusted_ms = (inner.base_interval.as_millis() as f64 / mult) as u64;
+        inner.min_interval = Duration::from_millis(adjusted_ms.max(1));
+        inner.phase = phase;
+    }
+
+    /// 获取当前阶段
+    pub fn phase(&self) -> TradingPhase {
+        self.inner.lock().unwrap().phase
+    }
+
+    /// 自动检测并设置交易阶段
+    pub fn auto_detect_phase(&self) -> TradingPhase {
+        let phase = detect_trading_phase();
+        self.set_phase(phase);
+        phase
+    }
+}
 
 // ================================================================
 // 股票代码编解码
@@ -39,18 +244,16 @@ pub fn code_bytes(code: &str) -> [u8; 6] {
 /// 代码长度不为 6 位或首字符无法识别时返回错误。
 pub fn auto_market(code: &str) -> Result<u8> {
     if code.len() != 6 {
-        return Err(TdxError::InvalidData(format!(
-            "无效的股票代码: {} (必须为 6 位数字)",
-            code
-        )));
+        return Err(crate::error_codes::ErrorCode::INVALID_STOCK_CODE.err(
+            format!("{} (必须为 6 位数字)", code)
+        ));
     }
     match code.chars().next() {
         Some('6') => Ok(MARKET_SH),
         Some('0') | Some('3') => Ok(MARKET_SZ),
-        _ => Err(TdxError::InvalidData(format!(
-            "无法自动识别市场代码: {}",
-            code
-        ))),
+        _ => Err(crate::error_codes::ErrorCode::UNKNOWN_CODE_FORMAT.err(
+            format!("无法自动识别市场代码: {}", code)
+        )),
     }
 }
 
@@ -145,7 +348,7 @@ pub fn decompress_zlib(data: &[u8]) -> Result<Vec<u8>> {
     let mut decoder = ZlibDecoder::new(data);
     let mut decompressed = Vec::new();
     decoder.read_to_end(&mut decompressed)
-        .map_err(|e| TdxError::ResponseParse(format!("zlib decompress: {}", e)))?;
+        .map_err(|e| crate::error_codes::ErrorCode::DECOMPRESS_FAILED.err(format!("{}", e)))?;
     Ok(decompressed)
 }
 
@@ -326,5 +529,81 @@ mod tests {
         assert_eq!(bytes.len(), 10);
         assert_eq!(&bytes[..4], b"test");
         assert_eq!(&bytes[4..], &[0, 0, 0, 0, 0, 0]);
+    }
+
+    // --- RateLimiter ---
+
+    #[test]
+    fn test_rate_limiter_cap_at_200() {
+        let limiter = RateLimiter::new(5); // 200 req/s
+        limiter.set_rps(500); // 超过上限
+        let inner = limiter.inner.lock().unwrap();
+        assert_eq!(inner.base_interval, Duration::from_millis(5));
+    }
+
+    #[test]
+    fn test_rate_limiter_set_200_exact() {
+        let limiter = RateLimiter::new(5);
+        limiter.set_rps(200);
+        let inner = limiter.inner.lock().unwrap();
+        assert_eq!(inner.base_interval, Duration::from_millis(5));
+    }
+
+    #[test]
+    fn test_rate_limiter_set_below_cap() {
+        let limiter = RateLimiter::new(5);
+        limiter.set_rps(10);
+        let inner = limiter.inner.lock().unwrap();
+        assert_eq!(inner.base_interval, Duration::from_millis(100));
+    }
+
+    #[test]
+    fn test_rate_limiter_disable() {
+        let limiter = RateLimiter::new(5);
+        limiter.set_rps(0);
+        assert!(!limiter.enabled.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn test_rate_limiter_wait_no_delay_when_disabled() {
+        let limiter = RateLimiter::new(0);
+        let start = Instant::now();
+        limiter.wait();
+        assert!(start.elapsed() < Duration::from_millis(10));
+    }
+
+    // --- TradingPhase ---
+
+    #[test]
+    fn test_rate_limiter_phase_trading() {
+        // base 100ms (10 req/s), Trading: ×1.0 → 100ms
+        let limiter = RateLimiter::new(100);
+        limiter.set_phase(TradingPhase::Trading);
+        let inner = limiter.inner.lock().unwrap();
+        assert_eq!(inner.min_interval, Duration::from_millis(100));
+    }
+
+    #[test]
+    fn test_rate_limiter_phase_pre_post() {
+        // base 100ms (10 req/s), PrePost: /2 → 50ms (20 req/s)
+        let limiter = RateLimiter::new(100);
+        limiter.set_phase(TradingPhase::PrePost);
+        let inner = limiter.inner.lock().unwrap();
+        assert_eq!(inner.min_interval, Duration::from_millis(50));
+    }
+
+    #[test]
+    fn test_rate_limiter_phase_closed() {
+        // base 100ms (10 req/s), Closed: /4 → 25ms (40 req/s)
+        let limiter = RateLimiter::new(100);
+        limiter.set_phase(TradingPhase::Closed);
+        let inner = limiter.inner.lock().unwrap();
+        assert_eq!(inner.min_interval, Duration::from_millis(25));
+    }
+
+    #[test]
+    fn test_detect_trading_phase_returns_valid() {
+        let phase = detect_trading_phase();
+        assert!(matches!(phase, TradingPhase::Trading | TradingPhase::PrePost | TradingPhase::Closed));
     }
 }

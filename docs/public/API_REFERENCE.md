@@ -2,7 +2,7 @@
 
 > 本文档覆盖 Python 公开 API。Rust 侧 API 请参见源码文档注释。
 >
-> 版本: v0.6.0 | 更新日期: 2026-06-21
+> 版本: v0.6.5 | 更新日期: 2026-07-01
 
 ---
 
@@ -10,6 +10,7 @@
 
 | 功能 | 对应章节 |
 |------|---------|
+| CLI 命令行工具 | [CLI 使用指南](CLI.md) |
 | K线数据 (核心) | [TdxHqClient — K线](#数据获取--k线) |
 | K线种类 | [category 对照表](#k线种类-category) |
 | 复权 | [fq 参数](#复权类型-fq) |
@@ -17,11 +18,15 @@
 | 分时 / 逐笔 | [TdxHqClient — 分时与逐笔](#数据获取--分时与逐笔) |
 | 财务 / 除权 / 板块 | [TdxHqClient — 财务与除权](#数据获取--财务与除权) |
 | 连接池 / 服务器管理 | [TdxHqClient — 连接管理](#连接管理) |
+| 异步客户端 (并发) | [AsyncTdxHqClient](#asynctdxhqclient) |
 | 裸连接方案 | [TdxDirectClient](#tdxdirectclient) |
-| ETF 数据 | [TdxHqEtfClient](#tdxhqetfclient) |
+| 基金数据 (ETF/LOF/REITs) | [TdxHqFundClient](#tdxhqfundclient) |
+| 板块查询 | [TdxBlockClient](#tdxblockclient) |
 | F10 公司资料 | [TdxF10Client](#tdxf10client) |
 | 本地文件 | [Reader 类](#reader-类) |
+| 错误码 | [错误码体系](#错误码体系) |
 | 常量 | [常量子模块](#常量-tdxrsconstants) |
+| 最佳实践 / 限流 / 优化 | [Python 最佳实践](PYTHON_BEST_PRACTICES.md) |
 
 ---
 
@@ -155,6 +160,9 @@ client.connect("119.147.212.81", 7709, timeout=5.0)
 | `set_auto_retry(enabled: bool)` | 启用/禁用内置重试 (生产环境建议关闭，用上层重试) |
 | `set_cache_ttl(secs: int)` | 缓存有效期 (秒)，影响 `get_security_count` / `get_security_list` |
 | `set_connect_timeout(secs: float)` | 连接超时 (秒) |
+| `set_rate_limit(rps: int)` | 默认限流 (req/s)，0=禁用，默认 50，上限 200 |
+| `set_rate_limit_daily(rps: int)` | 日K 限流 (req/s)，0=禁用，默认 15，上限 200 |
+| `rate_limit_minute()` → `int` | 分时限流 (固定 10 req/s，不可修改) |
 | `pool_stats()` → `{"idle": int, "active": int, "total": int, "max_size": int}` | 连接池状态 |
 
 ---
@@ -334,23 +342,30 @@ get_security_quotes_tuples(stocks) -> list[tuple]
 
 | 参数 | 类型 | 说明 |
 |------|------|------|
-| `stocks` | `list[(market, code)]` | 股票列表，如 `[(1, "600519"), (0, "000858")]` |
+| `stocks` | `list[(market, code)]` | 股票列表，**单次上限 60 只**，超出自动截断 |
 
 **返回字段 (dict)**: `market`, `code`, `price`, `last_close`, `open`, `high`, `low`, `vol`, `cur_vol`, `amount`, `s_vol`, `b_vol`, `bid1`～`bid5`, `ask1`～`ask5`, `bid_vol1`～`bid_vol5`, `ask_vol1`～`ask_vol5`, `servertime`
 
-> 行情无缓存，每次实时查询。
+> 行情无缓存，每次实时查询。**单次最多查询 60 只**，超出部分自动截断。如需查询更多，请自行分组调用后合并结果。
 
 ```python
 # 单只
 q = client.get_security_quotes([(1, "600519")])
 print(q[0]["price"], q[0]["bid1"])
 
-# 批量
+# 批量 (≤60 只)
 quotes = client.get_security_quotes([
     (1, "600519"), (0, "000858"), (0, "300750")
 ])
 for q in quotes:
     print(f"{q['code']}: {q['price']} (昨收{q['last_close']})")
+
+# 超过 60 只需分组
+def batch_quotes(client, stocks, batch_size=60):
+    results = []
+    for i in range(0, len(stocks), batch_size):
+        results.extend(client.get_security_quotes(stocks[i:i+batch_size]))
+    return results
 
 # DataFrame
 df = client.get_security_quotes_dataframe([
@@ -404,9 +419,25 @@ get_history_transaction_data(market, code, start, count, date) -> list[dict]    
 | `count` | int | 请求数量，上限 `MAX_TRANSACTION_COUNT`(2000) |
 | `date` | int | 日期，格式 `YYYYMMDD` (如 `20260421`) |
 
-**分时返回**: `[{"price": float, "vol": float}, ...]`
+**分时返回**: `[{"time": "HH:MM", "price": float, "avg_price": float, "vol": float}, ...]`
 
-**逐笔返回**: `[{"time": "HH:MM", "price": float, "vol": float, "num": int, "buyorsell": int}, ...]`
+> `time` 字段基于数据索引推算，标准分布为:
+> - 上午 120 点: index 0=`09:31` ~ index 119=`11:30`（不含集合竞价 09:30）
+> - 下午 120 点: index 120=`13:01` ~ index 239=`15:00`（不含集合竞价 13:00）
+> - 标准交易日共 240 点，上下开盘集合竞价视为无有效数据点
+> - 数据默认按时间倒序排列（最新记录在前）
+> - `vol` 单位为**手**（1手=100股）
+
+**逐笔返回**: `[{"time": "HH:MM", "price": float, "vol": float, "num": int, "buyorsell": int, "reserved": int}, ...]`
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `time` | str | 时间 `HH:MM`（协议仅存储分钟级精度） |
+| `price` | float | 成交价格 |
+| `vol` | float | 成交量（**手**，1手=100股） |
+| `num` | int | 成交笔数 |
+| `buyorsell` | int | 买卖方向: 0=买, 1=卖, 2=中性 |
+| `reserved` | int | 保留字段（股票数据中始终为0） |
 
 ---
 
@@ -500,6 +531,151 @@ let labeled = fc.get_finance_indicators_labeled("gpcw20260331.dat", filesize, "6
 
 ---
 
+### AsyncTdxHqClient
+
+异步行情客户端。底层使用通道化连接池 (channel-based pool) 实现真正的并发请求，内部持有独立 tokio Runtime。
+
+```python
+from tdxrs import AsyncTdxHqClient
+client = AsyncTdxHqClient()
+```
+
+**与 TdxHqClient 的核心差异**:
+
+| 维度 | TdxHqClient | AsyncTdxHqClient |
+|------|-------------|------------------|
+| 连接模型 | 共享连接池 (Mutex) | 通道化连接池 (每连接独立 task) |
+| 并发方式 | 连接级串行，池级并发 | 请求级并发 (tokio channel) |
+| 心跳 | std::thread | tokio::spawn (async) |
+| 限流 | std::sync::Mutex | tokio::sync::Mutex |
+| Python 调用 | 同步阻塞 | 同步阻塞 (内部 block_on) |
+| GIL 释放 | 否 | 否 (与 TdxHqClient 一致) |
+| 适用场景 | 通用，首选 | 高并发批量请求、tokio 生态集成 |
+
+> **Python 调用方式与 TdxHqClient 完全一致** — 所有方法同步返回，内部通过 `tokio::runtime::Runtime::block_on()` 执行异步操作。
+
+**适用场景**:
+- 批量并发请求 (多只股票同时查询，连接间真正并行)
+- tokio 生态集成 (Rust 侧可直接 `await`)
+- 需要更细粒度连接池控制的场景
+
+#### 连接管理
+
+| 方法 | 返回 | 说明 |
+|------|------|------|
+| `AsyncTdxHqClient()` | | 默认构造 (4 连接池) |
+| `AsyncTdxHqClient.with_pool_size(n)` | | 指定连接池大小 (静态方法) |
+| `connect(ip, port, timeout=None)` | `bool` | 连接到指定服务器 |
+| `connect_to_any(timeout=None)` | `bool` | 连接到任意可用服务器 |
+| `disconnect()` | `None` | 断开所有连接并停止心跳 |
+| `connection_count()` | `int` | 当前连接数 |
+| `is_connected()` | `bool` | 连接是否存活 |
+
+```python
+from tdxrs import AsyncTdxHqClient
+
+# 默认 4 连接
+client = AsyncTdxHqClient()
+client.connect("180.153.18.170", 7709)
+
+# 或指定连接数
+client = AsyncTdxHqClient.with_pool_size(8)
+client.connect_to_any()
+```
+
+#### 配置
+
+| 方法 | 说明 |
+|------|------|
+| `set_rate_limit(rps)` | 设置限流 RPS (0=禁用, 上限 200) |
+| `set_phase(phase)` | 设置交易阶段: `"trading"` / `"prepost"` / `"closed"` |
+| `auto_detect_phase()` | 自动检测并设置限流，返回阶段名称 |
+
+**限流规则** (与 TdxHqClient 一致):
+
+| 阶段 | RPS | 触发条件 |
+|------|-----|---------|
+| Trading (盘中) | 15 | 工作日 9:30-15:00 |
+| PrePost (盘前盘后) | 30 | 工作日其他时段 |
+| Closed (休市) | 60 | 周末 / 节假日 |
+
+> 每个连接独立限流。4 连接池实际吞吐 = RPS × 4。
+
+#### 数据获取 — K线
+
+API 签名与 TdxHqClient 完全一致，支持三种输出格式:
+
+| 方法 | 返回 | 说明 |
+|------|------|------|
+| `get_security_bars(cat, mkt, code, start, count, fq)` | `list[dict]` | 个股K线 |
+| `get_security_bars_tuples(...)` | `list[tuple]` | 高性能 tuple 模式 |
+| `get_security_bars_dataframe(...)` | `DataFrame` | pandas DataFrame |
+| `get_security_bars_all(cat, mkt, code, count, fq)` | `list[dict]` | 自动分页 |
+| `get_index_bars(cat, mkt, code, start, count, fq)` | `list[dict]` | 指数K线 |
+| `get_index_bars_tuples(...)` | `list[tuple]` | 指数 tuple 模式 |
+| `get_index_bars_dataframe(...)` | `DataFrame` | 指数 DataFrame |
+| `get_index_bars_all(cat, mkt, code, count, fq)` | `list[dict]` | 指数自动分页 |
+
+#### 数据获取 — 实时行情
+
+| 方法 | 返回 | 说明 |
+|------|------|------|
+| `get_security_quotes(stocks)` | `list[dict]` | 批量实时行情 (五档)，**单次上限 60 只** |
+| `get_security_quotes_tuples(stocks)` | `list[tuple]` | 高性能 tuple 模式，**单次上限 60 只** |
+| `get_security_quotes_dataframe(stocks)` | `DataFrame` | pandas DataFrame，**单次上限 60 只** |
+
+#### 数据获取 — 其他
+
+| 方法 | 返回 | 说明 |
+|------|------|------|
+| `get_security_count(market)` | `int` | 证券数量 |
+| `get_security_list(market, start)` | `list[dict]` | 证券列表 |
+| `get_minute_time_data(market, code)` | `list[dict]` | 分时数据 |
+| `get_history_minute_time_data(market, code, date)` | `list[dict]` | 历史分时 |
+| `get_transaction_data(market, code, start, count)` | `list[dict]` | 逐笔成交 |
+| `get_history_transaction_data(market, code, start, count, date)` | `list[dict]` | 历史逐笔 |
+| `get_finance_info(market, code)` | `dict` | 财务信息 |
+| `get_xdxr_info(market, code)` | `list[dict]` | 除权除息 |
+
+#### 完整示例
+
+```python
+from tdxrs import AsyncTdxHqClient
+from tdxrs.constants import (
+    MARKET_SH, MARKET_SZ, KLINE_DAILY, KLINE_5MIN,
+    FQ_QFQ, FQ_HFQ,
+)
+
+# 创建并连接 (4 连接池)
+client = AsyncTdxHqClient()
+client.connect("180.153.18.170", 7709)
+
+# 自动检测交易阶段
+phase = client.auto_detect_phase()
+print(f"当前阶段: {phase}")  # "closed"
+
+# 个股日K (前复权)
+bars = client.get_security_bars(KLINE_DAILY, MARKET_SH, "600519", 0, 100, FQ_QFQ)
+# [{'open': 1500.0, 'close': 1510.0, 'high': 1520.0, 'low': 1495.0, ...}, ...]
+
+# 高性能 tuple 模式
+tuples = client.get_security_bars_tuples(KLINE_DAILY, MARKET_SH, "600519", 0, 100)
+# [(1500.0, 1510.0, 1520.0, 1495.0, 12345.0, 18000000.0, 2026, 6, 20, 0, 0, '2026-06-20'), ...]
+
+# DataFrame 模式
+df = client.get_security_bars_dataframe(KLINE_DAILY, MARKET_SH, "600519", 0, 100)
+
+# 批量实时行情
+quotes = client.get_security_quotes([(MARKET_SH, "600519"), (MARKET_SZ, "000858")])
+
+# 自动分页获取全部日K
+all_bars = client.get_security_bars_all(KLINE_DAILY, MARKET_SH, "600519", 800, FQ_QFQ)
+
+client.disconnect()
+```
+
+---
+
 ### TdxDirectClient
 
 裸连接客户端。每次 API 调用独立建立 TCP 连接 + 握手，无连接池、无重试、无心跳、无缓存。
@@ -546,32 +722,97 @@ dc.set_server("180.153.18.17", 7709)  # 切换服务器
 
 ---
 
-### TdxHqEtfClient
+### TdxHqFundClient
 
-ETF 行情客户端 (扩展模块)。封装 `TdxHqClient`，自动处理 ETF 代码验证。
+基金行情客户端 (扩展模块)。封装 `TdxHqClient`，支持 ETF/LOF/REITs/分级基金等全部基金类型。
 
 ```python
-from tdxrs.pro import TdxHqEtfClient
-from tdxrs.constants import MARKET_SH
+from tdxrs import TdxHqFundClient
+from tdxrs.constants import MARKET_SH, MARKET_SZ
 
-client = TdxHqEtfClient()
+client = TdxHqFundClient()
 client.connect_to_any()
-```
 
-完整 API 详见 [ETF 模块文档](ETF.md)。
+# 获取基金列表 (含类型信息)
+funds = client.get_fund_list(MARKET_SH)
+# [{'code': '510300', 'fund_type': 'ETF', 'fund_type_zh': '交易型开放式指数基金', ...}, ...]
+
+# 分类基金类型
+TdxHqFundClient.classify_fund(MARKET_SH, "510300")  # → "ETF"
+TdxHqFundClient.classify_fund(MARKET_SH, "508000")  # → "REITs"
+TdxHqFundClient.classify_fund(MARKET_SZ, "162006")  # → "Structured"
+```
 
 | 方法 | 返回 | 说明 |
 |------|------|------|
-| `get_etf_list(market)` | `list[dict]` | ETF 列表 |
-| `get_etf_bars(cat, mkt, code, start, count)` | `list[dict]` | ETF K线 |
-| `get_etf_bars_all(cat, mkt, code, count)` | `list[dict]` | 自动分页 |
-| `get_etf_quotes(stocks)` | `list[dict]` | 实时行情 (五档) |
-| `get_etf_minute_time_data(mkt, code)` | `list[dict]` | 分时数据 |
-| `get_etf_transaction_data(mkt, code, start, count)` | `list[dict]` | 逐笔成交 |
-| `get_etf_xdxr_info(mkt, code)` | `list[dict]` | 除权除息 |
-| `get_etf_finance_info(mkt, code)` | `dict` | 财务信息 |
-| `is_etf(market, code)` | `bool` | 静态: 判断 ETF |
+| `get_fund_list(market)` | `list[dict]` | 基金列表 (含 fund_type) |
+| `get_fund_bars(cat, mkt, code, start, count)` | `list[dict]` | 基金K线 |
+| `get_fund_bars_all(cat, mkt, code, count)` | `list[dict]` | 自动分页 |
+| `get_fund_quotes(stocks)` | `list[dict]` | 实时行情 (五档) |
+| `get_fund_minute_time_data(mkt, code)` | `list[dict]` | 分时数据 |
+| `get_fund_transaction_data(mkt, code, start, count)` | `list[dict]` | 逐笔成交 |
+| `get_fund_xdxr_info(mkt, code)` | `list[dict]` | 除权除息 |
+| `get_fund_finance_info(mkt, code)` | `dict` | 财务信息 |
+| `is_fund(market, code)` | `bool` | 静态: 判断基金 |
+| `is_etf(market, code)` | `bool` | 静态: 判断ETF |
+| `classify_fund(market, code)` | `str` | 静态: 基金类型 |
 | `auto_market_code(code)` | `int` | 静态: 自动市场 |
+
+**基金类型 (FundType)**:
+
+| 类型 | 代码前缀 | 说明 |
+|------|---------|------|
+| ETF | 510/512/513/515/516/159 | 交易型开放式指数基金 |
+| LOF | 501/502/160/161 | 上市型开放式基金 |
+| REITs | 508 | 不动产投资信托基金 |
+| Structured | 162/163/164 | 分级基金 |
+| Bond | 511 | 债券ETF |
+| OpenEnd | 519 | 传统开放式基金 |
+
+---
+
+### TdxBlockClient
+
+板块专用客户端，内置K线级别限制，禁用分时/逐笔。
+
+```python
+from tdxrs import TdxBlockClient
+
+client = TdxBlockClient("58.63.254.191", 7709, 5.0)
+
+# 板块K线 (自动限制)
+bars = client.get_block_bars(4, "880001", 0, 100)  # 日K
+bars = client.get_block_bars(0, "881001", 0, 0)    # 5min (默认50条)
+
+# 实时行情
+quotes = client.get_block_quotes(["880001", "881001"])
+
+# 板块列表 (从服务器下载 .dat 文件)
+industry = client.get_industry_blocks()   # 行业/筛选板块 (block_fg.dat)
+concept = client.get_concept_blocks()     # 概念板块 (block_gn.dat)
+index = client.get_index_blocks()         # 指数成分 (block_zs.dat)
+custom = client.get_block_list("block.dat")  # 自定义文件
+```
+
+| 方法 | 返回 | 说明 |
+|------|------|------|
+| `get_block_bars(category, code, start, count)` | `list[dict]` | 板块K线 (带限制) |
+| `get_block_quotes(codes)` | `list[dict]` | 板块实时行情 |
+| `get_block_list(block_file)` | `list[dict]` | 下载并解析指定 `.dat` 板块文件 |
+| `get_industry_blocks()` | `list[dict]` | 获取行业/筛选板块 (block_fg.dat) |
+| `get_concept_blocks()` | `list[dict]` | 获取概念板块 (block_gn.dat) |
+| `get_index_blocks()` | `list[dict]` | 获取指数成分 (block_zs.dat) |
+
+**K线限制**:
+
+| 级别 | 默认 | 上限 | 说明 |
+|------|------|------|------|
+| 日/周/月 | 100 | 800 | 无限制 |
+| 60min | 200 | 800 | |
+| 30min/15min/5min | 50 | 200 | |
+| 1min | — | — | **禁用** |
+
+**禁用接口**: 分时数据、逐笔成交（板块数据无意义）
 
 ---
 
@@ -804,6 +1045,132 @@ client.connect_to_any(timeout=5.0)
 
 ---
 
+## 批量下载器 (`tdxrs.downloader`)
+
+多服务器分发 + 自动翻页 + 增量更新 + 断点续传。
+
+```python
+from tdxrs.downloader import Downloader
+```
+
+### Downloader
+
+| 参数 | 类型 | 默认 | 说明 |
+|------|------|:--:|------|
+| `data_dir` | str | `"./data"` | 数据存储根目录 (支持 `~` 展开) |
+| `servers` | list[tuple] | 内置 5 台 | 服务器列表 `[(名称, IP, 端口), ...]` |
+| `rate_limit` | int | 15 | 每服务器每秒请求数 |
+| `format` | str | `"tdx"` | 输出格式: `"tdx"` / `"csv"` / `"parquet"` |
+| `fq` | int | 0 | 复权类型: 0=不复权, 1=前复权, 2=后复权 |
+
+| 方法 | 说明 |
+|------|------|
+| `run(markets, categories, codes)` | 全量下载 K线 |
+| `update(markets, categories)` | 增量更新 (仅下载新数据) |
+| `download_minute(dates, codes, markets)` | 按日下载分时数据 (codes 必填) |
+| `download_ticks(dates, codes, markets)` | 按日下载逐笔成交 (codes 必填) |
+| `run_xdxr(markets, codes)` | 下载除权除息数据 |
+| `progress()` | 返回统计 `{"done": int, "skipped": int, "failed": int}` |
+
+### 按日下载 (分时 / 逐笔)
+
+分时和逐笔数据支持按日期下载，使用协议原生日期参数，无需计算交易日历。
+
+```python
+dl = Downloader(data_dir="./data")
+
+# 分时数据: 单日多只
+dl.download_minute("2026-06-25", codes=["600519", "000858"])
+
+# 分时数据: 多日多只
+dl.download_minute(["2026-06-25", "2026-06-24"], codes=["600519"])
+
+# 逐笔成交: 自动翻页 (2000条/页)
+dl.download_ticks(20260625, codes=["600519"])
+```
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| `dates` | str/int/list | 日期: `"2026-06-25"`、`20260625`、或列表 |
+| `codes` | list[str] | **必填**，股票代码列表 |
+| `markets` | list[str] | `["sh", "sz"]` (默认) |
+
+> **注意**: `codes` 为必填参数，不支持全市场模式。分时/逐笔为单品种接口，每只股票独立请求。
+
+### 输出格式
+
+| format | 扩展名 | DailyBarReader 可读 | 说明 |
+|:------:|:------:|:---:|------|
+| `"tdx"` | `.day` | ✅ | 默认，与通达信格式兼容 |
+| `"csv"` | `.csv` | ❌ | 标准 CSV |
+| `"parquet"` | `.parquet` | ❌ | 需要 pyarrow |
+
+### 数据目录结构
+
+```
+data/
+├── .tdxrs_meta/
+│   ├── checkpoint.json     # 断点续传进度
+│   └── last_sync.json      # 增量同步记录
+├── sh/
+│   ├── daily/600519.day
+│   ├── weekly/600519.day
+│   ├── minute/600519_20260625.csv   # 分时数据
+│   └── ticks/600519_20260625.csv    # 逐笔成交
+└── sz/
+    └── daily/000858.day
+```
+
+---
+
+## 错误码体系
+
+所有错误码按模块分段，便于识别和处理：
+
+| 范围 | 模块 | 说明 |
+|------|------|------|
+| 1000-1099 | 通用 | 参数校验、输入错误 |
+| 1100-1199 | 代码分类 | 股票/指数/板块/债券/基金 |
+| 1200-1299 | 限流 | 请求频率限制 |
+| 2000-2099 | 连接 | 网络连接错误 |
+| 2100-2199 | 协议 | TDX 协议错误 |
+| 3000-3099 | 解析 | 数据解析错误 |
+| 4000-4099 | 文件 | 本地文件错误 |
+
+### 常用错误码
+
+| 错误码 | 常量 | 说明 |
+|:------:|------|------|
+| 1101 | `ERR_BLOCK_CODE_IN_GENERAL_CLIENT` | 板块代码在通用客户端被拒绝 |
+| 1201 | `ERR_RATE_LIMIT_EXCEEDED` | 通用请求限流 |
+| 1202 | `ERR_RATE_LIMIT_DAILY_EXCEEDED` | 日K级别限流 |
+| 1203 | `ERR_RATE_LIMIT_MINUTE_EXCEEDED` | 分时限流 (不可禁用) |
+| 1204 | `ERR_BLOCK_KLINE_CATEGORY_NOT_ALLOWED` | 板块K线级别不支持 |
+| 2001 | `ERR_CONNECTION_FAILED` | 连接失败 |
+| 2002 | `ERR_CONNECTION_TIMEOUT` | 连接超时 |
+| 3001 | `ERR_INVALID_DATE` | 日期格式无效 |
+| 3002 | `ERR_DATE_OUT_OF_RANGE` | 日期超出范围 |
+
+### 错误信息格式
+
+```
+[E1101] block code (88xxxx) not allowed in general client, use TdxBlockClient: code=880001
+```
+
+格式: `[E错误码] 英文描述: 具体信息`
+
+Python 端可通过异常消息获取错误码：
+
+```python
+try:
+    bars = client.get_security_bars(KLINE_DAILY, MARKET_SH, "880001", 0, 100)
+except ValueError as e:
+    if "[E1101]" in str(e):
+        print("板块代码请使用 TdxBlockClient")
+```
+
+---
+
 ## 注意事项
 
 1. **K线种类选择**: 日线推荐 `category=4` (KLINE_DAILY) 而非 `category=9` (KLINE_RI_K)，前者支持未复权查询。
@@ -811,7 +1178,8 @@ client.connect_to_any(timeout=5.0)
 3. **分页上限**: 单次 `count > 800` 请求会被截断，使用 `_all` 方法自动分页。
 4. **连接管理**: 长时间不用连接池会自动心跳保活 (10s)，生产环境建议关闭 `set_auto_retry(False)` 用上层重试逻辑。
 5. **并发**: 高并发场景推荐 `TdxDirectClient` (每线程独立连接)，连接池在高并发下退化严重。
-6. **异步**: `AsyncTdxHqClient` 暂无 Python 绑定，需通过 Rust 侧调用。
+6. **限流**: 分时限流固定 10 req/s 不可禁用；全局限流上限 200 req/s。
+7. **批量下载**: 下载器默认输出 `.day` 格式，可被 `DailyBarReader` 直接读取；多服务器分发自动限流。
 
 ---
 

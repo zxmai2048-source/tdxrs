@@ -1,12 +1,12 @@
 # tdxrs 安装和使用说明
 
-> 版本: v0.5.1 | 更新: 2026-05-12
+> 版本: v0.6.5 | 更新: 2026-07-02
 
 ## 环境要求
 
 | 组件 | 最低版本 | 说明 |
 |------|----------|------|
-| Python | 3.8+ | 运行 Python 绑定 |
+| Python | 3.11+ | 运行 Python 绑定 |
 | Rust | 1.83+ | 从源码构建时需要 (pyo3 0.28 要求) |
 | maturin | 1.5+ | 构建 Python 扩展模块 |
 
@@ -47,7 +47,7 @@ tdxrs = { path = "path/to/tdxrs" }
 
 ```python
 import tdxrs
-print(tdxrs.__version__)  # 0.5.1
+print(tdxrs.__version__)  # 0.6.5
 ```
 
 ---
@@ -57,6 +57,10 @@ print(tdxrs.__version__)  # 0.5.1
 - **本地文件解析** — 日线 (.day) / 分钟线 (.lc5/.lc1) / 板块 (.dat) / 财务 (gpcw*.dat)
 - **网络行情客户端** — 4 种客户端方案覆盖不同场景
 - **复权计算** — 客户端侧前复权/后复权，支持分红+送股+配股联动
+- **基金数据** — ETF/LOF/REITs/分级基金，含净值、持仓、申赎清单
+- **板块查询** — 板块列表、板块成分股 (概念/行业/地域)
+- **CLI 命令行** — `tdxrs quote`/`tdxrs bars`/`tdxrs trades` 等快捷查询
+- **批量下载** — `tdxrs download`/`tdxrs update` 按市场下载/增量更新日线数据
 
 ---
 
@@ -218,18 +222,20 @@ for q in quotes:
 ### 分时和逐笔
 
 ```python
-# 当日分时
+# 当日分时 (240 点: 09:31~11:30 + 13:01~15:00，不含开盘集合竞价)
 ticks = client.get_minute_time_data(market=1, code="000001")
 
 # 历史分时 (date: YYYYMMDD)
 ticks = client.get_history_minute_time_data(market=1, code="000001", date=20260429)
 
-# 逐笔成交
+# 逐笔成交 (vol 单位为 "手"，1手=100股)
 ticks = client.get_transaction_data(market=1, code="600519", start=0, count=100)
 
 # 历史逐笔
 ticks = client.get_history_transaction_data(market=1, code="600519", start=0, count=100, date=20260429)
 ```
+
+> **v0.6.5**: 逐笔成交新增 `reserved` 字段；基金价格精度修正 (科创板 ETF 58xxxx 价格系数 0.001)
 
 ### 财务数据
 
@@ -281,6 +287,104 @@ for s in stocks[:5]:
 ```python
 blocks = client.get_and_parse_block_info("block_zs.dat")
 ```
+
+### 异步客户端 (AsyncTdxHqClient)
+
+```python
+from tdxrs import AsyncTdxHqClient
+from tdxrs.constants import MARKET_SH, KLINE_DAILY
+
+# 创建异步客户端
+client = AsyncTdxHqClient()
+client.connect_to_any(timeout=5.0)
+
+# API 与 TdxHqClient 一致，通过 block_on() 执行
+bars = client.get_security_bars(KLINE_DAILY, MARKET_SH, "600519", 0, 100)
+
+# 适用场景: 高并发批量请求 (内部 Channel 连接池，无锁争用)
+```
+
+### 基金客户端 (TdxHqFundClient)
+
+```python
+from tdxrs import TdxHqFundClient
+from tdxrs.constants import MARKET_SH, KLINE_DAILY
+
+client = TdxHqFundClient()
+client.connect_to_any(timeout=5.0)
+
+# 基金列表
+funds = client.get_fund_list(MARKET_SH)
+
+# 实时行情 (market, code)
+quotes = client.get_fund_quotes([(MARKET_SH, "510300"), (MARKET_SZ, "159915")])
+
+# 基金 K 线
+bars = client.get_fund_bars(KLINE_DAILY, MARKET_SH, "510300", 0, 100)
+
+# 财务信息
+fin = client.get_fund_finance_info(MARKET_SH, "510300")
+```
+
+> 支持全部基金类型: ETF (50/51/15 开头)、LOF (16 开头)、REITs (508/180 开头)、分级基金 (15 开头)
+
+### 板块客户端 (TdxBlockClient)
+
+```python
+from tdxrs import TdxBlockClient
+
+client = TdxBlockClient("58.63.254.191", 7709, 5.0)
+
+# 板块 K 线 (88xxxx 代码)
+bars = client.get_block_bars(4, "880001", 0, 100)  # 日K
+
+# 板块实时行情
+quotes = client.get_block_quotes(["880001", "880002"])
+```
+
+> 板块列表可通过 `TdxHqClient.get_and_parse_block_info("block_zs.dat")` 获取。
+
+### 财务独立客户端 (TdxFinanceClient)
+
+```python
+from tdxrs._internal import TdxFinanceClient
+
+client = TdxFinanceClient()
+client.connect_to_any(timeout=5.0)
+
+# 历史财务数据 (自动分片下载)
+data = client.get_financial_data(market=1, code="600519")
+# 返回 45 个英文命名指标 (净利润/总资产/每股收益等)
+```
+
+---
+
+## CLI 命令行
+
+tdxrs 提供命令行工具，无需编写代码即可查询数据。
+
+```bash
+# 实时行情
+tdxrs quote 600519 000858
+
+# K 线数据
+tdxrs bars 600519 --count 10 --type daily
+
+# 逐笔成交
+tdxrs trades 600519 --count 20
+
+# 分时数据
+tdxrs minutes 000001
+
+# 批量下载日线 (默认路径: ./tdx_data/)
+tdxrs download --market sh --start 20260101 --end 20260630
+
+# 增量更新 (仅下载新数据)
+tdxrs update --market sh
+tdxrs update --market sh --code 600519  # 指定个股
+```
+
+> CLI 详细用法见 [CLI 文档](CLI.md)
 
 ---
 

@@ -166,24 +166,24 @@ python examples/gen_bench_charts.py
 
 ---
 
-## 6. ETF / F10 模块性能
+## 6. Fund / F10 模块性能
 
 > 测试环境: 180.153.18.170:7709, 2026-06-21
 > 测试脚本: `tests/bench_etf_f10.py`
 
-### ETF 模块 (共享连接池)
+### Fund 模块 (TdxHqFundClient, 共享连接池)
 
 | 接口 | 平均耗时 | 返回量 |
 |------|----------|--------|
 | connect_to_any | ~300ms | — |
-| get_etf_list(SH) | ~2.5s | 811 只 (多页) |
-| get_etf_bars(5分钟,10) | ~70ms | 10 条 |
-| get_etf_quotes(1只) | ~70ms | 1 条 |
-| get_etf_quotes(2只) | ~70ms | 2 条 |
-| get_etf_minute_time_data | ~65ms | 240 条 |
-| get_etf_transaction_data(100) | ~65ms | 100 条 |
-| get_etf_xdxr_info | ~70ms | 15 条 |
-| get_etf_finance_info | ~65ms | 7 项 |
+| get_fund_list(SH) | ~2.5s | 811 只 (多页) |
+| get_fund_bars(5分钟,10) | ~70ms | 10 条 |
+| get_fund_quotes(1只) | ~70ms | 1 条 |
+| get_fund_quotes(2只) | ~70ms | 2 条 |
+| get_fund_minute_time_data | ~65ms | 240 条 |
+| get_fund_transaction_data(100) | ~65ms | 100 条 |
+| get_fund_xdxr_info | ~70ms | 15 条 |
+| get_fund_finance_info | ~65ms | 7 项 |
 
 ### F10 模块 (独立连接, 需 `--features f10` 源码编译)
 
@@ -255,7 +255,7 @@ benches/
 1. 顺序请求样本量有限（7 次 API），单次网络波动可能影响个别数据点
 2. 连接池并发退化根因为锁粒度，非架构缺陷
 3. Python TdxDirectClient 绑定不支持 `_all` / `_tuples` / `_dataframe`（Rust 侧同步不支持）
-4. `AsyncTdxHqClient` 暂无 Python 绑定
+4. ~~`AsyncTdxHqClient` 暂无 Python 绑定~~ (v0.6.3 已添加 `PyAsyncTdxHqClient`)
 
 ---
 
@@ -338,19 +338,19 @@ Flask/FastAPI 后端, QPS < 10, 每请求调用 1-2 次 TDX API
   单次小请求 (<1KB)，混在行情请求中无影响
 ```
 
-### ETF 场景
+### 基金场景
 
 ```
-ETF 量化回测, 需要多只 ETF 的日线数据
-  → TdxHqEtfClient
+基金量化回测, 需要多只基金的日线数据
+  → TdxHqFundClient
   共享连接池，批量获取 ~70ms/次
-  自动 ETF 代码验证，非 ETF 代码报错
+  自动 FundType 分类，支持 ETF/LOF/REITs/分级基金
 ```
 
 ```
-ETF 实时监控, 每分钟查询 5 只 ETF 行情
-  → TdxHqEtfClient
-  一次 get_etf_quotes 批量获取 ~70ms
+基金实时监控, 每分钟查询 5 只基金行情
+  → TdxHqFundClient
+  一次 get_fund_quotes 批量获取 ~70ms
 ```
 
 ### F10 场景

@@ -1,6 +1,8 @@
+pub mod block;
 pub mod constants;
 pub mod error;
-pub mod etf;
+pub mod error_codes;
+pub mod fund;
 pub mod helpers;
 pub mod logging;
 pub mod net;
@@ -25,8 +27,11 @@ fn tdxrs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Client classes
     m.add_class::<python::py_client::PyTdxHqClient>()?;
     m.add_class::<python::py_direct_client::PyTdxDirectClient>()?;
-    // ETF client
-    m.add_class::<python::py_etf::PyTdxHqEtfClient>()?;
+    m.add_class::<python::py_async_client::PyAsyncTdxHqClient>()?;
+    // Fund client
+    m.add_class::<python::py_fund::PyTdxHqFundClient>()?;
+    // Block client
+    m.add_class::<python::py_fund::PyTdxBlockClient>()?;
     // F10 profile client — 需要 --features f10 启用
     #[cfg(feature = "f10")]
     m.add_class::<python::py_profile::PyTdxF10Client>()?;

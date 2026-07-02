@@ -52,6 +52,12 @@ pub fn parse_block(data: &[u8]) -> Result<Vec<BlockRecord>> {
 
         let block_stock_begin = pos;
 
+        // Skip blocks with invalid block_type (only 2 is valid)
+        if block_type != 2 {
+            pos = block_stock_begin + BLOCK_STOCK_AREA;
+            continue;
+        }
+
         for code_index in 0..stock_count {
             let code_end = pos + CODE_SIZE;
             if code_end > data.len() {
@@ -105,6 +111,13 @@ pub fn parse_block_group(data: &[u8]) -> Result<Vec<BlockGroup>> {
         pos += 4;
 
         let block_stock_begin = pos;
+
+        // Skip blocks with invalid block_type (only 2 is valid)
+        if block_type != 2 {
+            pos = block_stock_begin + BLOCK_STOCK_AREA;
+            continue;
+        }
+
         let mut codes = Vec::new();
 
         for _ in 0..stock_count {
@@ -153,9 +166,9 @@ mod tests {
         let name = b"Test\x00\x00\x00\x00\x00";
         data.extend_from_slice(name);
 
-        // stock_count=2, block_type=1
+        // stock_count=2, block_type=2
         data.extend_from_slice(&2u16.to_le_bytes());
-        data.extend_from_slice(&1u16.to_le_bytes());
+        data.extend_from_slice(&2u16.to_le_bytes());
 
         // 2 stock codes
         data.extend_from_slice(b"600519\x00");

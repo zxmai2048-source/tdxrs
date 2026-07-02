@@ -1,5 +1,4 @@
 pub mod async_client;
-pub mod async_connection;
 pub mod client;
 pub mod connection;
 pub mod direct_client;

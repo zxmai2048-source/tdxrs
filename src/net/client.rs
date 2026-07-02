@@ -7,13 +7,15 @@ use flate2::read::ZlibDecoder;
 use std::io::Read;
 
 use crate::error::{Result, TdxError};
+use crate::error_codes::ErrorCode;
 use crate::net::connection::TcpConnection;
 use crate::net::packet::{ResponseHeader, RSP_HEADER_LEN};
 use crate::net::pool::{ConnectionPool, PoolConfig, PoolStats};
-use crate::net::utils;
+use crate::net::utils::{self, RateLimiter};
 use crate::protocol::constants::*;
 use crate::protocol::parsers::*;
 use crate::protocol::types::*;
+use crate::{logi, logw, loge};
 
 /// 缓存条目
 struct CacheEntry<T> {
@@ -35,6 +37,12 @@ pub struct TdxHqClient {
     connect_timeout: Mutex<f64>,
     /// 用户自定义优先服务器列表 (为空时使用 PRIMARY_SERVERS)
     server_list: Mutex<Vec<(String, String, u16)>>,
+    /// 速率限制器: 默认 (50 req/s)
+    rate_limiter: RateLimiter,
+    /// 速率限制器: 日K 级别 (15 req/s)
+    rate_limiter_daily: RateLimiter,
+    /// 速率限制器: 分时级别 (10 req/s, 不允许解禁)
+    rate_limiter_minute: RateLimiter,
 }
 
 impl TdxHqClient {
@@ -56,7 +64,21 @@ impl TdxHqClient {
             cache_ttl: Mutex::new(Duration::from_secs(30)),
             connect_timeout: Mutex::new(CONNECT_TIMEOUT),
             server_list: Mutex::new(Vec::new()),
+            rate_limiter: RateLimiter::new(20),      // 默认 50 req/s
+            rate_limiter_daily: RateLimiter::new(67), // 日K 15 req/s
+            rate_limiter_minute: RateLimiter::new(100), // 分时 10 req/s (不允许解禁)
         }
+    }
+
+    /// 检查代码是否为板块代码 (88xxxx)，如果是则返回错误
+    fn check_not_block_code(&self, code: &str) -> Result<()> {
+        if crate::error_codes::is_block_code(code) {
+            return Err(TdxError::coded(
+                ErrorCode::BLOCK_CODE_IN_GENERAL_CLIENT,
+                format!("code={}", code),
+            ));
+        }
+        Ok(())
     }
 
     /// 连接到 TDX 服务器
@@ -95,8 +117,9 @@ impl TdxHqClient {
             }
         }
 
-        Err(TdxError::Connection(
-            "All servers unreachable".into(),
+        loge!("hq", "all servers unreachable (tried user/primary/all_known lists)");
+        Err(crate::error_codes::ErrorCode::CONNECTION_FAILED.err(
+            "all servers unreachable"
         ))
     }
 
@@ -239,6 +262,7 @@ impl TdxHqClient {
         if start_heartbeat {
             self.start_heartbeat();
         }
+        logi!("hq", "connected to {}:{}", ip, port);
         Ok(true)
     }
 
@@ -247,6 +271,7 @@ impl TdxHqClient {
         self.stop_heartbeat();
         self.pool.lock().unwrap().close_all();
         self.connected.store(false, Ordering::SeqCst);
+        logi!("hq", "disconnected");
     }
 
     /// 是否已连接
@@ -272,6 +297,25 @@ impl TdxHqClient {
     /// 获取连接池状态
     pub fn pool_stats(&self) -> PoolStats {
         self.pool.lock().unwrap().stats()
+    }
+
+    /// 设置默认请求速率限制 (每秒请求数, 0=禁用)
+    ///
+    /// 默认 50 req/s。
+    pub fn set_rate_limit(&self, rps: u32) {
+        self.rate_limiter.set_rps(rps);
+    }
+
+    /// 设置日K 级别速率限制 (每秒请求数, 0=禁用)
+    ///
+    /// 默认 15 req/s。影响: get_security_bars / get_index_bars (category >= 4)
+    pub fn set_rate_limit_daily(&self, rps: u32) {
+        self.rate_limiter_daily.set_rps(rps);
+    }
+
+    /// 获取分时级别速率限制 (固定 10 req/s, 不可修改)
+    pub fn rate_limit_minute(&self) -> u32 {
+        10
     }
 
     // ================================================================
@@ -331,6 +375,7 @@ impl TdxHqClient {
 
                     if !alive {
                         connected.store(false, Ordering::SeqCst);
+                        logw!("hq", "heartbeat failed, connection marked dead");
                     }
                 }
             }
@@ -354,8 +399,16 @@ impl TdxHqClient {
     // Internal send/recv with retry
     // ================================================================
 
-    /// 发送请求并接收响应 (核心方法，带重试)
+    /// 发送请求并接收响应 (默认限流)
     fn send_and_recv(&self, packet: &[u8]) -> Result<Vec<u8>> {
+        self.send_and_recv_limited(packet, &self.rate_limiter)
+    }
+
+    /// 发送请求并接收响应 (指定限流器)
+    fn send_and_recv_limited(&self, packet: &[u8], limiter: &RateLimiter) -> Result<Vec<u8>> {
+        // 限流
+        limiter.wait();
+
         // 第一次尝试
         match self.try_send_and_recv(packet) {
             Ok(body) => return Ok(body),
@@ -364,7 +417,8 @@ impl TdxHqClient {
         }
 
         // 重试
-        for &interval in RETRY_INTERVALS {
+        for (i, &interval) in RETRY_INTERVALS.iter().enumerate() {
+            logw!("hq", "request failed, retry {}/{} in {:.1}s", i + 1, RETRY_INTERVALS.len(), interval);
             std::thread::sleep(Duration::from_secs_f64(interval));
 
             // 尝试重连
@@ -377,7 +431,10 @@ impl TdxHqClient {
             }
         }
 
-        Err(TdxError::RetryExhausted(RETRY_INTERVALS.len() + 1))
+        loge!("hq", "retry exhausted after {} attempts", RETRY_INTERVALS.len() + 1);
+        Err(crate::error_codes::ErrorCode::RETRY_EXHAUSTED.err(
+            format!("{} attempts", RETRY_INTERVALS.len() + 1)
+        ))
     }
 
     /// 从连接池借出连接并执行请求
@@ -385,9 +442,7 @@ impl TdxHqClient {
         let server = self.last_server.lock().unwrap().clone()
             .unwrap_or_else(|| (PRIMARY_SERVERS[0].1.to_string(), PRIMARY_SERVERS[0].2));
         let pool = self.pool.lock().unwrap();
-        let mut guard = pool.borrow(&server).map_err(|e| {
-            TdxError::Connection(format!("failed to borrow connection: {}", e))
-        })?;
+        let mut guard = pool.borrow(&server)?;
 
         let conn = guard.conn();
 
@@ -408,7 +463,7 @@ impl TdxHqClient {
         }
 
         if body_buf.is_empty() {
-            return Err(TdxError::Disconnected);
+            return Err(ErrorCode::DISCONNECTED.err("empty response body"));
         }
 
         // Decompress if needed
@@ -416,7 +471,7 @@ impl TdxHqClient {
             let mut decoder = ZlibDecoder::new(&body_buf[..]);
             let mut decompressed = Vec::new();
             decoder.read_to_end(&mut decompressed).map_err(|e| {
-                TdxError::ResponseParse(format!("zlib decompress failed: {}", e))
+                ErrorCode::DECOMPRESS_FAILED.err(format!("{}", e))
             })?;
             Ok(decompressed)
         } else {
@@ -451,6 +506,8 @@ impl TdxHqClient {
             return;
         }
 
+        logw!("hq", "connection lost, attempting reconnect...");
+
         let last = self.last_server.lock().unwrap().clone();
         if let Some((ref ip, port)) = last {
             if self.connect_internal(ip, port, Some(CONNECT_TIMEOUT), false).is_ok() {
@@ -477,6 +534,8 @@ impl TdxHqClient {
                 return;
             }
         }
+
+        loge!("hq", "reconnect failed, all servers unreachable");
     }
 
     // ================================================================
@@ -496,8 +555,9 @@ impl TdxHqClient {
         count: u16,
         fq: u8,
     ) -> Result<Vec<SecurityBar>> {
+        self.check_not_block_code(code)?;
         let packet = utils::build_security_bars_packet(category, market, code, start, count, fq);
-        let body = self.send_and_recv(&packet)?;
+        let body = self.send_and_recv_limited(&packet, &self.rate_limiter_daily)?;
         let mut bars = parse_security_bars(&body, category)?;
 
         // 客户端侧复权计算 (v0.4.2)
@@ -583,9 +643,10 @@ impl TdxHqClient {
         count: u16,
         fq: u8,
     ) -> Result<Vec<IndexBar>> {
+        self.check_not_block_code(code)?;
         let _ = fq; // 指数不复权，强制 fq=0 发送
         let packet = utils::build_index_bars_packet(category, market, code, start, count, 0);
-        let body = self.send_and_recv(&packet)?;
+        let body = self.send_and_recv_limited(&packet, &self.rate_limiter_daily)?;
         parse_index_bars(&body, category)
     }
 
@@ -623,10 +684,25 @@ impl TdxHqClient {
     }
 
     /// 获取实时行情
+    ///
+    /// 单次查询上限 60 只 (TDX 服务端硬限制)，超出自动截断并打印警告。
+    /// 如需查询更多，请自行分组调用后合并结果。
     pub fn get_security_quotes(
         &self,
         all_stock: &[(u8, &str)],
     ) -> Result<Vec<SecurityQuote>> {
+        // 服务端上限截断
+        let all_stock = if all_stock.len() > MAX_QUOTES_COUNT {
+            logw!("hq", "批量行情查询超过上限 {}/{}，自动截断。请自行分组调用。",
+                  all_stock.len(), MAX_QUOTES_COUNT);
+            &all_stock[..MAX_QUOTES_COUNT]
+        } else {
+            all_stock
+        };
+        // 检查是否有板块代码
+        for &(_, code) in all_stock {
+            self.check_not_block_code(code)?;
+        }
         let stock_len = all_stock.len() as u16;
         let pkgdatalen = (stock_len as u32) * 7 + 12;
 
@@ -724,23 +800,17 @@ impl TdxHqClient {
         Ok(count)
     }
 
-    /// 获取分时数据
+    /// 获取当日分时数据
+    ///
+    /// 内部委托给历史分时 API (传入今日日期)，避免实时分时 API (0x051d)
+    /// 的价格编码异常（基金类价格 1000x 偏高）。
     pub fn get_minute_time_data(
         &self,
         market: u8,
         code: &str,
     ) -> Result<Vec<MinuteTimePrice>> {
-        let code_buf = utils::code_bytes(code);
-        let mut packet = Vec::with_capacity(24);
-        packet.extend_from_slice(&[
-            0x0c, 0x1b, 0x08, 0x00, 0x01, 0x01, 0x0e, 0x00, 0x0e, 0x00, 0x1d, 0x05,
-        ]);
-        packet.extend_from_slice(&(market as u16).to_le_bytes());
-        packet.extend_from_slice(&code_buf);
-        packet.extend_from_slice(&0u32.to_le_bytes());
-
-        let body = self.send_and_recv(&packet)?;
-        parse_minute_time_data(&body, market, code)
+        let today = utils::today_yyyymmdd();
+        self.get_history_minute_time_data(market, code, today)
     }
 
     /// 获取历史分时数据
@@ -759,7 +829,7 @@ impl TdxHqClient {
         packet.push(market);
         packet.extend_from_slice(&code_buf);
 
-        let body = self.send_and_recv(&packet)?;
+        let body = self.send_and_recv_limited(&packet, &self.rate_limiter_minute)?;
         parse_history_minute_time_data(&body, market, code)
     }
 
@@ -781,8 +851,9 @@ impl TdxHqClient {
         packet.extend_from_slice(&start.to_le_bytes());
         packet.extend_from_slice(&count.to_le_bytes());
 
-        let body = self.send_and_recv(&packet)?;
-        parse_transaction_data(&body)
+        let body = self.send_and_recv_limited(&packet, &self.rate_limiter_minute)?;
+        let coefficient = get_security_coefficient(market, code);
+        parse_transaction_data_with_coefficient(&body, coefficient)
     }
 
     /// 获取历史逐笔成交
@@ -805,8 +876,9 @@ impl TdxHqClient {
         packet.extend_from_slice(&start.to_le_bytes());
         packet.extend_from_slice(&count.to_le_bytes());
 
-        let body = self.send_and_recv(&packet)?;
-        parse_history_transaction_data(&body)
+        let body = self.send_and_recv_limited(&packet, &self.rate_limiter_minute)?;
+        let coefficient = get_security_coefficient(market, code);
+        parse_transaction_data_with_coefficient(&body, coefficient)
     }
 
     /// 获取财务信息
