@@ -636,6 +636,52 @@ API 签名与 TdxHqClient 完全一致，支持三种输出格式:
 | `get_history_transaction_data(market, code, start, count, date)` | `list[dict]` | 历史逐笔 |
 | `get_finance_info(market, code)` | `dict` | 财务信息 |
 | `get_xdxr_info(market, code)` | `list[dict]` | 除权除息 |
+| `calc_fq_factors(market, code, start, count)` | `dict` | 复权因子计算 |
+
+#### 复权因子计算 (`calc_fq_factors`)
+
+独立计算复权因子，不修改 K 线数据。用于验证复权精度或导出因子表。
+
+**参数**:
+| 参数 | 类型 | 默认 | 说明 |
+|------|------|------|------|
+| `market` | int | — | 市场代码 (0=深圳, 1=上海) |
+| `code` | str | — | 股票代码 |
+| `start` | int | 0 | 起始位置 (0=最新) |
+| `count` | int | 800 | K 线数量 |
+
+**返回值**:
+```python
+{
+    "factors": [
+        {
+            "date": 20250626,           # 除权日期 (YYYYMMDD)
+            "close_before": 1435.86,    # 前收盘价
+            "qfq_factor": 0.980727,     # 前复权因子
+            "hfq_factor": 1.019652,     # 后复权因子
+            "div_per_share": 2.767,     # 分红 (元/股)
+            "bonus_ratio": 0.0,         # 送股比例
+            "rights_ratio": 0.0,        # 配股比例
+            "rights_price": 0.0,        # 配股价
+        },
+        ...
+    ],
+    "cumulative_qfq": 0.117160,   # 累计前复权因子
+    "cumulative_hfq": 8.535349,   # 累计后复权因子
+}
+```
+
+**示例**:
+```python
+# 计算复权因子
+result = client.calc_fq_factors(MARKET_SH, "600519", start=0, count=800)
+
+print(f"累计前复权因子: {result['cumulative_qfq']:.6f}")
+print(f"累计后复权因子: {result['cumulative_hfq']:.6f}")
+
+for f in result['factors']:
+    print(f"  {f['date']}: QFQ={f['qfq_factor']:.6f}")
+```
 
 #### 完整示例
 

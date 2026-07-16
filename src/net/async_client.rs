@@ -238,6 +238,8 @@ pub struct AsyncTdxHqClient {
     heartbeat_stop: tokio::sync::Mutex<Option<oneshot::Sender<()>>>,
     /// 连接是否存活 (心跳检测)
     connected: Arc<std::sync::atomic::AtomicBool>,
+    /// 复权上下文数据量档位 (默认 Mid ≈ 20 年)
+    fq_context_tier: utils::FqContextTier,
 }
 
 impl AsyncTdxHqClient {
@@ -257,6 +259,7 @@ impl AsyncTdxHqClient {
             pool_size: pool_size.max(1),
             heartbeat_stop: tokio::sync::Mutex::new(None),
             connected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            fq_context_tier: utils::FqContextTier::default(),
         }
     }
 
@@ -511,10 +514,11 @@ impl AsyncTdxHqClient {
         }
 
         let max_per_page = MAX_KLINE_COUNT as u32;
+        let max_pages = self.fq_context_tier.pages();
         let mut context = Vec::new();
         let mut offset = max_per_page;
 
-        for _page in 0..8 {
+        for _page in 0..max_pages {
             let pkt = utils::build_security_bars_packet(
                 category, market, code, offset, MAX_KLINE_COUNT, 0,
             );
@@ -547,6 +551,16 @@ impl AsyncTdxHqClient {
         }
 
         context
+    }
+
+    /// 设置复权上下文数据量档位
+    pub fn set_fq_context_tier(&mut self, tier: utils::FqContextTier) {
+        self.fq_context_tier = tier;
+    }
+
+    /// 获取当前复权上下文档位
+    pub fn fq_context_tier(&self) -> utils::FqContextTier {
+        self.fq_context_tier
     }
 
     // ================================================================

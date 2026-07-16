@@ -30,7 +30,7 @@ pub struct TdxHqClient {
     auto_retry: AtomicBool,
     heartbeat_stop: Mutex<Option<Arc<AtomicBool>>>,
     heartbeat_handle: Mutex<Option<std::thread::JoinHandle<()>>>,
-    last_server: Mutex<Option<(String, u16)>>,
+    last_server: Arc<Mutex<Option<(String, u16)>>>,
     count_cache: Mutex<HashMap<u8, CacheEntry<u16>>>,
     list_cache: Mutex<HashMap<u8, CacheEntry<Vec<SecurityInfo>>>>,
     cache_ttl: Mutex<Duration>,
@@ -43,6 +43,8 @@ pub struct TdxHqClient {
     rate_limiter_daily: RateLimiter,
     /// 速率限制器: 分时级别 (10 req/s, 不允许解禁)
     rate_limiter_minute: RateLimiter,
+    /// 复权上下文数据量档位 (默认 Mid ≈ 20 年)
+    fq_context_tier: utils::FqContextTier,
 }
 
 impl TdxHqClient {
@@ -58,7 +60,7 @@ impl TdxHqClient {
             auto_retry: AtomicBool::new(true),
             heartbeat_stop: Mutex::new(None),
             heartbeat_handle: Mutex::new(None),
-            last_server: Mutex::new(None),
+            last_server: Arc::new(Mutex::new(None)),
             count_cache: Mutex::new(HashMap::new()),
             list_cache: Mutex::new(HashMap::new()),
             cache_ttl: Mutex::new(Duration::from_secs(30)),
@@ -67,6 +69,7 @@ impl TdxHqClient {
             rate_limiter: RateLimiter::new(20),      // 默认 50 req/s
             rate_limiter_daily: RateLimiter::new(67), // 日K 15 req/s
             rate_limiter_minute: RateLimiter::new(100), // 分时 10 req/s (不允许解禁)
+            fq_context_tier: utils::FqContextTier::default(),
         }
     }
 
@@ -328,9 +331,9 @@ impl TdxHqClient {
         let pool = Arc::clone(&self.pool.lock().unwrap());
         let connected = Arc::clone(&self.connected);
         let stop_clone = stop.clone();
-        let server = self.last_server.lock().unwrap().clone()
-            .unwrap_or_else(|| (PRIMARY_SERVERS[0].1.to_string(), PRIMARY_SERVERS[0].2));
+        let last_server = Arc::clone(&self.last_server);
         let interval = Duration::from_secs_f64(DEFAULT_HEARTBEAT_INTERVAL);
+        let connect_timeout = *self.connect_timeout.lock().unwrap();
 
         let handle = std::thread::spawn(move || {
             while !stop_clone.load(Ordering::Relaxed) {
@@ -340,7 +343,9 @@ impl TdxHqClient {
                 }
 
                 // 尝试从池中借出连接做心跳
-                if let Ok(Some(mut guard)) = pool.try_borrow(&server) {
+                let current_server = last_server.lock().unwrap().clone()
+                    .unwrap_or_else(|| (PRIMARY_SERVERS[0].1.to_string(), PRIMARY_SERVERS[0].2));
+                if let Ok(Some(mut guard)) = pool.try_borrow(&current_server) {
                     let alive = (|| -> bool {
                         let conn = guard.conn();
                         let mut packet = Vec::with_capacity(18);
@@ -374,8 +379,35 @@ impl TdxHqClient {
                     })();
 
                     if !alive {
+                        // 心跳失败: 标记断线 + 关闭池中空闲连接
                         connected.store(false, Ordering::SeqCst);
-                        logw!("hq", "heartbeat failed, connection marked dead");
+                        pool.close_all();
+                        logw!("hq", "heartbeat failed, pool cleared, attempting reconnect...");
+
+                        // 尝试重连到替代服务器 (跳过当前失败的服务器)
+                        let mut reconnected = false;
+                        for &(name, ip, port) in PRIMARY_SERVERS {
+                            if ip == current_server.0 && port == current_server.1 {
+                                continue; // 跳过当前失败的服务器
+                            }
+                            match TcpConnection::connect(ip, port, connect_timeout) {
+                                Ok(mut tcp) => {
+                                    if utils::perform_handshake(&mut tcp).is_ok() {
+                                        let new_server = (ip.to_string(), port);
+                                        pool.push(tcp, new_server.clone());
+                                        *last_server.lock().unwrap() = Some(new_server);
+                                        connected.store(true, Ordering::SeqCst);
+                                        logi!("hq", "heartbeat reconnect to {} ({})", name, ip);
+                                        reconnected = true;
+                                        break;
+                                    }
+                                }
+                                Err(_) => continue,
+                            }
+                        }
+                        if !reconnected {
+                            loge!("hq", "heartbeat reconnect failed, all PRIMARY servers unreachable");
+                        }
                     }
                 }
             }
@@ -501,6 +533,9 @@ impl TdxHqClient {
     }
 
     /// 尝试重连
+    ///
+    /// 策略: 先试上次服务器 (可能临时故障已恢复)，失败则跳过它尝试替代服务器。
+    /// 心跳线程可能已经重连成功 (更新了 pool 和 connected)，此时直接返回。
     fn reconnect_if_needed(&self) {
         if self.connected.load(Ordering::SeqCst) {
             return;
@@ -509,27 +544,37 @@ impl TdxHqClient {
         logw!("hq", "connection lost, attempting reconnect...");
 
         let last = self.last_server.lock().unwrap().clone();
+
+        // 1) 先试上次服务器 (可能临时故障已恢复)
         if let Some((ref ip, port)) = last {
             if self.connect_internal(ip, port, Some(CONNECT_TIMEOUT), false).is_ok() {
                 return;
             }
         }
 
-        // 用户自定义 → PRIMARY → ALL_KNOWN
+        // 2) 跳过失败的服务器，尝试替代服务器
+        let skip = last.as_ref().map(|(ip, port)| (ip.as_str(), *port));
+
+        // 用户自定义列表
         {
             let list = self.server_list.lock().unwrap();
             for (_, ip, port) in list.iter() {
+                if Some((ip.as_str(), *port)) == skip { continue; }
                 if self.connect_internal(ip, *port, Some(CONNECT_TIMEOUT), false).is_ok() {
                     return;
                 }
             }
         }
+        // PRIMARY (跳过失败的)
         for &(_, ip, port) in PRIMARY_SERVERS {
+            if Some((ip, port)) == skip { continue; }
             if self.connect_internal(ip, port, Some(CONNECT_TIMEOUT), false).is_ok() {
                 return;
             }
         }
+        // ALL_KNOWN (跳过失败的)
         for &(_, ip, port) in ALL_KNOWN_SERVERS {
+            if Some((ip, port)) == skip { continue; }
             if self.connect_internal(ip, port, Some(CONNECT_TIMEOUT), false).is_ok() {
                 return;
             }
@@ -589,10 +634,104 @@ impl TdxHqClient {
         bars: &[SecurityBar],
         xdxr: &[XdXrInfo],
     ) -> Vec<SecurityBar> {
-        utils::fetch_context_bars_for_adjust(
+        utils::fetch_context_bars_for_adjust_with_tier(
             |pkt| self.send_and_recv(pkt),
             category, market, code, bars, xdxr,
+            self.fq_context_tier,
         )
+    }
+
+    /// 设置复权上下文数据量档位
+    ///
+    /// 控制复权计算时拉取的历史 K 线数量:
+    /// - `Low`: 约 10 年 (2400 根)
+    /// - `Mid`: 约 20 年 (4800 根, 默认)
+    /// - `High`: 约 30 年 (7200 根)
+    pub fn set_fq_context_tier(&mut self, tier: utils::FqContextTier) {
+        self.fq_context_tier = tier;
+    }
+
+    /// 获取当前复权上下文档位
+    pub fn fq_context_tier(&self) -> utils::FqContextTier {
+        self.fq_context_tier
+    }
+
+    /// 获取复权因子计算所需的上下文数据 (追溯到上市)
+    ///
+    /// 与 `fetch_context_bars_for_adjust` 类似，但会持续拉取直到:
+    /// 1. 覆盖所有 XDXR 事件，或
+    /// 2. 达到最大页数限制 (30 页 = 24000 根 ≈ 96 年)
+    ///
+    /// 用于 `calc_fq_factors` 接口，确保因子计算的完整性。
+    pub fn fetch_context_for_factors(
+        &self,
+        category: u8,
+        market: u8,
+        code: &str,
+        bars: &[SecurityBar],
+        xdxr: &[XdXrInfo],
+    ) -> Result<Vec<SecurityBar>> {
+        if bars.is_empty() || xdxr.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // 找到最早的除权事件
+        let earliest_event = xdxr
+            .iter()
+            .filter(|x| x.category == 1)
+            .map(|x| x.year as u32 * 10000 + x.month as u32 * 100 + x.day as u32)
+            .min();
+
+        let Some(ee_date) = earliest_event else { return Ok(Vec::new()) };
+
+        // 检查是否需要上下文
+        let first_bar_date =
+            bars[0].year as u32 * 10000 + bars[0].month as u32 * 100 + bars[0].day as u32;
+
+        if first_bar_date <= ee_date {
+            return Ok(Vec::new());
+        }
+
+        // 持续拉取直到覆盖最早事件或达到上限 (30 页)
+        let max_per_page = MAX_KLINE_COUNT as u32;
+        let max_pages = 30u32; // 约 96 年，足够覆盖任何 A 股上市时间
+        let mut context = Vec::new();
+        let mut offset = max_per_page;
+
+        for _page in 0..max_pages {
+            let pkt = utils::build_security_bars_packet(
+                category, market, code, offset, MAX_KLINE_COUNT, 0,
+            );
+            let body = match self.send_and_recv(&pkt) {
+                Ok(b) => b,
+                Err(_) => break,
+            };
+            let batch = match parse_security_bars(&body, category) {
+                Ok(b) => b,
+                Err(_) => break,
+            };
+            if batch.is_empty() {
+                break;
+            }
+
+            let batch_first_date =
+                batch[0].year as u32 * 10000 + batch[0].month as u32 * 100 + batch[0].day as u32;
+
+            let len_before = context.len();
+            context.splice(0..0, batch);
+
+            // 找到覆盖最早事件的数据就停止
+            if batch_first_date <= ee_date {
+                break;
+            }
+
+            offset += max_per_page;
+            if context.len() == len_before {
+                break;
+            }
+        }
+
+        Ok(context)
     }
 
     /// 获取K线数据 (自动分页)

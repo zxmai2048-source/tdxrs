@@ -20,6 +20,8 @@ pub struct TdxDirectClient {
     ip: String,
     port: u16,
     timeout: f64,
+    /// 复权上下文数据量档位 (默认 Mid ≈ 20 年)
+    fq_context_tier: utils::FqContextTier,
 }
 
 impl TdxDirectClient {
@@ -28,6 +30,7 @@ impl TdxDirectClient {
             ip: ip.to_string(),
             port,
             timeout,
+            fq_context_tier: utils::FqContextTier::default(),
         }
     }
 
@@ -97,10 +100,89 @@ impl TdxDirectClient {
         bars: &[SecurityBar],
         xdxr: &[XdXrInfo],
     ) -> Vec<SecurityBar> {
-        utils::fetch_context_bars_for_adjust(
+        utils::fetch_context_bars_for_adjust_with_tier(
             |pkt| self.send_and_recv(pkt),
             category, market, code, bars, xdxr,
+            self.fq_context_tier,
         )
+    }
+
+    /// 设置复权上下文数据量档位
+    pub fn set_fq_context_tier(&mut self, tier: utils::FqContextTier) {
+        self.fq_context_tier = tier;
+    }
+
+    /// 获取当前复权上下文档位
+    pub fn fq_context_tier(&self) -> utils::FqContextTier {
+        self.fq_context_tier
+    }
+
+    /// 获取复权因子计算所需的上下文数据 (追溯到上市)
+    pub fn fetch_context_for_factors(
+        &self,
+        category: u8,
+        market: u8,
+        code: &str,
+        bars: &[SecurityBar],
+        xdxr: &[XdXrInfo],
+    ) -> Result<Vec<SecurityBar>> {
+        if bars.is_empty() || xdxr.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let earliest_event = xdxr
+            .iter()
+            .filter(|x| x.category == 1)
+            .map(|x| x.year as u32 * 10000 + x.month as u32 * 100 + x.day as u32)
+            .min();
+
+        let Some(ee_date) = earliest_event else { return Ok(Vec::new()) };
+
+        let first_bar_date =
+            bars[0].year as u32 * 10000 + bars[0].month as u32 * 100 + bars[0].day as u32;
+
+        if first_bar_date <= ee_date {
+            return Ok(Vec::new());
+        }
+
+        let max_per_page = MAX_KLINE_COUNT as u32;
+        let max_pages = 30u32;
+        let mut context = Vec::new();
+        let mut offset = max_per_page;
+
+        for _page in 0..max_pages {
+            let pkt = utils::build_security_bars_packet(
+                category, market, code, offset, MAX_KLINE_COUNT, 0,
+            );
+            let body = match self.send_and_recv(&pkt) {
+                Ok(b) => b,
+                Err(_) => break,
+            };
+            let batch = match parse_security_bars(&body, category) {
+                Ok(b) => b,
+                Err(_) => break,
+            };
+            if batch.is_empty() {
+                break;
+            }
+
+            let batch_first_date =
+                batch[0].year as u32 * 10000 + batch[0].month as u32 * 100 + batch[0].day as u32;
+
+            let len_before = context.len();
+            context.splice(0..0, batch);
+
+            if batch_first_date <= ee_date {
+                break;
+            }
+
+            offset += max_per_page;
+            if context.len() == len_before {
+                break;
+            }
+        }
+
+        Ok(context)
     }
 
     // ================================================================

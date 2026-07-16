@@ -4,6 +4,7 @@
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue)](https://www.python.org/)
 [![pyo3](https://img.shields.io/badge/pyo3-0.28-green)](https://pyo3.rs/)
 [![License](https://img.shields.io/badge/license-MIT-brightgreen)](../../LICENSE)
+[![Star History Rank](https://api.star-history.com/badge?repo=jiangtaovan/tdxrs)](https://www.star-history.com/jiangtaovan/tdxrs)
 
 **tdxrs** 是通达信 (TDX) 行情数据解析库的 Rust 实现。通过 PyO3/maturin 提供 Python 调用接口，保持与 Python [tdxpy](https://github.com/rainx/tdxpy) 项目的功能兼容，利用 Rust 的内存安全和零成本抽象特性显著提升解析性能。
 

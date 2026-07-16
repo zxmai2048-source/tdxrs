@@ -28,6 +28,112 @@ use crate::protocol::constants::FQ_PRICE_PRECISION;
 use crate::protocol::types::{IndexBar, SecurityBar, XdXrInfo};
 use std::collections::BTreeMap;
 
+// ================================================================
+// 复权因子计算接口 (独立于 K 线调整)
+// ================================================================
+
+/// 单个除权事件的因子详情
+#[derive(Debug, Clone)]
+pub struct FqFactorItem {
+    /// 除权除息日期 (YYYYMMDD)
+    pub date: u32,
+    /// 前收盘价 (除权日前一交易日收盘价)
+    pub close_before: f64,
+    /// 前复权因子 (QFQ)
+    pub qfq_factor: f64,
+    /// 后复权因子 (HFQ = 1/QFQ)
+    pub hfq_factor: f64,
+    /// 分红 (元/股, 已从元/10股转换)
+    pub div_per_share: f64,
+    /// 送股比例 (已从股/10股转换)
+    pub bonus_ratio: f64,
+    /// 配股比例 (已从股/10股转换)
+    pub rights_ratio: f64,
+    /// 配股价 (元/股)
+    pub rights_price: f64,
+}
+
+/// 复权因子计算结果
+#[derive(Debug, Clone)]
+pub struct FqFactorResult {
+    /// 因子列表 (按日期升序)
+    pub factors: Vec<FqFactorItem>,
+    /// 累计前复权因子 (所有因子的乘积)
+    pub cumulative_qfq: f64,
+    /// 累计后复权因子 (= 1/cumulative_qfq)
+    pub cumulative_hfq: f64,
+}
+
+/// 计算复权因子 (不修改 K 线数据)
+///
+/// 根据 XDXR 历史和上下文 K 线数据，计算并返回每个除权事件的复权因子。
+/// 可用于:
+/// - 验证复权精度
+/// - 手动应用复权调整
+/// - 导出因子表供外部使用
+///
+/// # 参数
+///
+/// - `xdxr_list`: 该股票的除权除息历史 (由 get_xdxr_info 获取)
+/// - `bars`: 请求的 K 线数据 (按日期升序)
+/// - `context_bars`: 额外的历史 K 线数据 (按日期升序)，用于查找除权日前收盘价
+///
+/// # 返回
+///
+/// `FqFactorResult` 包含每个事件的因子和累计因子。
+/// 如果某个事件找不到前收盘价，该事件将被跳过。
+pub fn calc_fq_factors(
+    xdxr_list: &[XdXrInfo],
+    bars: &[SecurityBar],
+    context_bars: &[SecurityBar],
+) -> FqFactorResult {
+    let mut factors = Vec::new();
+
+    // 1. 构建除权事件 (升序)
+    let mut events: Vec<(u32, FactorParts)> = Vec::new();
+    for xd in xdxr_list {
+        if xd.category != 1 {
+            continue;
+        }
+        let date_key = xd.year * 10000 + xd.month * 100 + xd.day;
+        events.push((date_key, FactorParts {
+            div_per_share: xd.fenhong.unwrap_or(0.0) / 10.0,
+            bonus_ratio: xd.songzhuangu.unwrap_or(0.0) / 10.0,
+            rights_ratio: xd.peigu.unwrap_or(0.0) / 10.0,
+            rights_price: xd.peigujia.unwrap_or(0.0),
+        }));
+    }
+    events.sort_by_key(|e| e.0);
+
+    // 2. 计算每个事件的因子
+    let mut cumulative_qfq = 1.0;
+    for &(date_key, parts) in &events {
+        if let Some(p_close) = find_close_before_event(bars, context_bars, date_key) {
+            let qfq_factor = calc_qfq_factor(p_close, &parts);
+            let hfq_factor = if qfq_factor.abs() > 1e-10 { 1.0 / qfq_factor } else { 1.0 };
+
+            cumulative_qfq *= qfq_factor;
+
+            factors.push(FqFactorItem {
+                date: date_key,
+                close_before: p_close,
+                qfq_factor,
+                hfq_factor,
+                div_per_share: parts.div_per_share,
+                bonus_ratio: parts.bonus_ratio,
+                rights_ratio: parts.rights_ratio,
+                rights_price: parts.rights_price,
+            });
+        }
+    }
+
+    FqFactorResult {
+        factors,
+        cumulative_qfq,
+        cumulative_hfq: if cumulative_qfq.abs() > 1e-10 { 1.0 / cumulative_qfq } else { 1.0 },
+    }
+}
+
 /// 复权类型
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum FqType {

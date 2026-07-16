@@ -15,6 +15,39 @@ use crate::protocol::constants::*;
 use crate::protocol::parsers::parse_security_bars;
 use crate::protocol::types::{SecurityBar, XdXrInfo};
 
+/// 复权上下文数据量档位
+///
+/// 控制 `fetch_context_bars_for_adjust` 拉取的历史 K 线数量,
+/// 用于覆盖早期除权除息事件的因子计算。
+///
+/// | 档位 | 根数 | 约覆盖年限 (日K) |
+/// |------|------|------------------|
+/// | Low  | 2400 | ~10 年 |
+/// | Mid  | 4800 | ~20 年 (默认) |
+/// | High | 7200 | ~30 年 |
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FqContextTier {
+    /// 约 10 年 (3 页 × 800 根)
+    Low = 2400,
+    /// 约 20 年 (6 页 × 800 根) — 默认
+    Mid = 4800,
+    /// 约 30 年 (9 页 × 800 根)
+    High = 7200,
+}
+
+impl FqContextTier {
+    /// 计算对应的翻页数
+    pub fn pages(&self) -> u32 {
+        *self as u32 / MAX_KLINE_COUNT as u32
+    }
+}
+
+impl Default for FqContextTier {
+    fn default() -> Self {
+        FqContextTier::Mid
+    }
+}
+
 // ================================================================
 // 交易阶段检测
 // ================================================================
@@ -368,6 +401,21 @@ pub fn fetch_context_bars_for_adjust<F: Fn(&[u8]) -> Result<Vec<u8>>>(
     bars: &[SecurityBar],
     xdxr: &[XdXrInfo],
 ) -> Vec<SecurityBar> {
+    fetch_context_bars_for_adjust_with_tier(send_fn, category, market, code, bars, xdxr, FqContextTier::default())
+}
+
+/// 为复权计算获取额外的历史 K 线上下文 (可指定档位)
+///
+/// `tier` 控制最大翻页数: Low=3页(2400根), Mid=6页(4800根), High=9页(7200根)
+pub fn fetch_context_bars_for_adjust_with_tier<F: Fn(&[u8]) -> Result<Vec<u8>>>(
+    send_fn: F,
+    category: u8,
+    market: u8,
+    code: &str,
+    bars: &[SecurityBar],
+    xdxr: &[XdXrInfo],
+    tier: FqContextTier,
+) -> Vec<SecurityBar> {
     if bars.is_empty() || xdxr.is_empty() {
         return Vec::new();
     }
@@ -388,10 +436,11 @@ pub fn fetch_context_bars_for_adjust<F: Fn(&[u8]) -> Result<Vec<u8>>>(
     }
 
     let max_per_page = MAX_KLINE_COUNT as u32;
+    let max_pages = tier.pages();
     let mut context = Vec::new();
     let mut offset = max_per_page;
 
-    for _page in 0..8 {
+    for _page in 0..max_pages {
         let pkt = build_security_bars_packet(category, market, code, offset, MAX_KLINE_COUNT, 0);
         let body = match send_fn(&pkt) {
             Ok(b) => b,
