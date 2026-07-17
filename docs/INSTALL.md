@@ -1,6 +1,6 @@
 # tdxrs 安装和使用说明
 
-> 版本: v0.6.5 | 更新: 2026-07-02
+> 版本: v0.6.6 | 更新: 2026-07-17
 
 ## 环境要求
 
@@ -406,6 +406,160 @@ client.probe_servers(timeout=3.0)  # 探测延迟
 
 ---
 
+## 使用规范与最佳实践
+
+### 调用方式说明
+
+tdxrs 设计为**编排程序调用**，而非交互式逐条调用。正确的调用方式可以:
+- 减少服务器压力，保护数据源稳定性
+- 避免触发服务器限流或协议异常
+- 提高数据获取效率和成功率
+
+#### 推荐: 编排程序调用
+
+```python
+# ✅ 正确: 连接池复用 + 限流控制 + 批量处理
+from tdxrs import TdxHqClient
+from tdxrs.constants import MARKET_SH, KLINE_DAILY
+
+client = TdxHqClient()
+client.connect_to_any()
+
+# 批量获取多只股票
+stocks = ["600519", "000858", "300750"]
+for code in stocks:
+    bars = client.get_security_bars(KLINE_DAILY, MARKET_SH, code, 0, 100)
+    # 处理数据...
+    time.sleep(0.1)  # 适当间隔
+
+client.disconnect()
+```
+
+#### 避免: 逐条 skill 调用或裸连接高频调用
+
+```python
+# ❌ 错误: 每次请求新建连接 (AI skill 调用往往是此模式)
+for code in stocks:
+    client = TdxDirectClient(ip, port)  # 新建 TCP + 3 次握手
+    bars = client.get_security_bars(...)
+    # 无连接复用，无状态保持，无限制流
+```
+
+### 客户端选择指南
+
+| 场景 | 推荐客户端 | 原因 |
+|------|-----------|------|
+| 生产环境顺序请求 | `TdxHqClient` | 连接池(5) + 心跳 + 重试 + 缓存 |
+| 高并发批量请求 | `TdxDirectClient` | 独立连接，60 线程零退化 |
+| 异步生态集成 | `AsyncTdxHqClient` | tokio 异步，通道化连接池 |
+| 基金数据 | `TdxHqFundClient` | 共享连接池 + 基金代码验证 |
+| 偶发请求/测试 | `TdxDirectClient` | 无状态，简单直接 |
+
+### 限流机制
+
+tdxrs 内置交易时段自适应限流，保护服务器:
+
+| 时段 | 默认限流 | 说明 |
+|------|:--------:|------|
+| 盘中 (9:30-15:00) | 15 req/s | 交易活跃期 |
+| 盘前/盘后 | 30 req/s | 过渡时段 |
+| 休市 | 60 req/s | 非交易日 |
+
+```python
+# 自动检测当前时段
+client.auto_detect_phase()
+
+# 或手动设置
+client.set_phase("trading")   # trading / prepost / closed
+```
+
+> 每连接独立限流，4 连接池实际吞吐 ×4。批量行情单次上限 60 只，超出自动截断。
+
+### 批量请求建议
+
+```python
+# ✅ 推荐: 带间隔的批量请求
+import time
+
+for code in stock_list:
+    bars = client.get_security_bars(KLINE_DAILY, market, code, 0, 100)
+    process(bars)
+    time.sleep(0.1)  # 100ms 间隔，避免突发压力
+
+# ✅ 推荐: 使用批量行情接口
+quotes = client.get_security_quotes([(market, code) for code in stock_list[:60]])
+
+# ✅ 推荐: 使用自动分页获取长历史
+all_bars = client.get_security_bars_all(KLINE_DAILY, market, code, count=3000)
+```
+
+### 服务器协议异常 (2026-07 起)
+
+自 2026 年 7 月起，部分 TDX 服务器出现协议层异常:
+
+| 症状 | 说明 |
+|------|------|
+| K 线/行情/逐笔返回空 | `get_security_bars()` / `get_security_quotes()` 返回 0 条 |
+| 元数据 API 正常 | `get_security_count()` / `get_finance_info()` / `get_xdxr_info()` 正常 |
+| 连接正常 | TCP 连接和握手成功 |
+
+**已确认受影响服务器:**
+- 海通 4 台 (58.63.254.191 / 182.118.47.151 / 175.6.5.153 / 182.131.3.245)
+- 广发 1 台 (119.29.19.242)
+- 华林 1 台 (202.96.138.90) — 连接不稳定
+
+**可能原因:**
+1. 服务器后端升级 (TDX 行情系统 CMD 协议变更)
+2. 不规范调用触发服务器保护机制
+3. 数据源分离 (元数据和行情数据来自不同后端)
+
+**tdxrs 应对措施:**
+- `connect_to_any()` 自动跳过已知故障服务器
+- `PRIMARY_SERVERS` 列表持续维护更新
+- 用户可通过 `set_servers()` 自定义服务器列表
+
+**用户建议:**
+1. 保持 tdxrs 版本更新 (故障服务器会持续更新到 PRIMARY_SERVERS)
+2. 使用连接池模式 (`TdxHqClient`)，避免高频裸连接
+3. 批量请求加入适当间隔 (`time.sleep(0.1)`)
+4. 如遇数据为空，可尝试指定服务器: `client.connect("183.60.224.177", 7709)`
+
+### AI 辅助开发注意事项
+
+使用 AI 工具 (如 Claude Code) 辅助开发时:
+
+| 注意事项 | 说明 |
+|---------|------|
+| 封装为脚本 | 将 tdxrs 逻辑封装为独立 Python 脚本，通过 `python script.py` 执行 |
+| 避免逐条调用 | 每次 skill 调用会新建连接，无连接复用 |
+| 控制调用频率 | 批量测试时加入间隔，避免突发高频请求 |
+| 使用连接池 | 优先使用 `TdxHqClient` 而非 `TdxDirectClient` |
+
+```python
+# ✅ 推荐: 封装为独立脚本
+# fetch_data.py
+from tdxrs import TdxHqClient
+from tdxrs.constants import MARKET_SH, KLINE_DAILY
+
+client = TdxHqClient()
+client.connect_to_any()
+
+stocks = ["600519", "000858", "300750"]
+results = {}
+for code in stocks:
+    bars = client.get_security_bars(KLINE_DAILY, MARKET_SH, code, 0, 100)
+    results[code] = bars
+
+client.disconnect()
+
+# 保存结果
+import json
+with open("results.json", "w") as f:
+    json.dump(results, f)
+```
+
+---
+
 ## 市场代码
 
 | 值 | 常量 | 市场 |
@@ -516,6 +670,14 @@ client.pool_stats() -> PoolStats
 - 确认股票代码正确 (6 位数字)
 - `category=9` 不支持 `fq=0`, 请用 `category=4`
 - 非交易时间无实时数据
+- **2026-07 起部分服务器协议异常** — 尝试更新 tdxrs 版本或指定服务器:
+  ```python
+  # 方式 1: 更新 tdxrs (PRIMARY_SERVERS 会维护故障服务器)
+  pip install --upgrade tdxrs
+
+  # 方式 2: 指定已验证可用的服务器
+  client.connect("183.60.224.177", 7709)  # 广发13
+  ```
 
 ### Q: 财务数据怎么解读单位？
 
