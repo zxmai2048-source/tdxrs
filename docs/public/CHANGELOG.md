@@ -13,24 +13,15 @@
   - 最多拉取 30 页 (24000 根 ≈ 96 年)，确保覆盖所有除权事件
   - 独立于 `fetch_context_bars_for_adjust`，不影响现有复权算法
 - **`FqContextTier` 复权上下文档位配置** — 支持三档配置
-  - `Low`: 约 10 年 (2400 根)
-  - `Mid`: 约 20 年 (4800 根，默认)
-  - `High`: 约 30 年 (7200 根)
+  - `Low`: 约 10 年 (2400 根) `Mid`: 约 20 年 (4800 根，默认) `High`: 约 30 年 (7200 根)
   - 客户端方法：`set_fq_context_tier()` / `fq_context_tier()`
-- **复权验证脚本** — `examples/dev/` 新增 4 个验证脚本
-  - `verify_fq_factors.py` — 验证复权因子计算
-  - `verify_fq_direction.py` — 验证 QFQ/HFQ 调整方向
-  - `export_fq_compare.py` — 导出复权数据供其他平台对比
-  - `verify_fq_start_param.py` — 验证 start 参数对复权的影响
 
 ### 优化
 - **复权上下文获取优化** — `fetch_context_bars_for_adjust` 支持可配置的翻页数
   - 新增 `fetch_context_bars_for_adjust_with_tier` 函数
   - 原有 `fetch_context_bars_for_adjust` 保持默认 Mid 档位
-  - 三个客户端（`TdxHqClient` / `TdxDirectClient` / `AsyncTdxHqClient`）均已支持
 - **连接管理优化** — 修复服务器选择和心跳重连问题
-  - **PRIMARY_SERVERS 修正** — 移除 5 台不可靠服务器，补入 5 台验证可用服务器
-    - 移除: 华林4 (202.96.138.90) 连接不稳定 + 海通8/海通3/海通2/海通4 K线接口返回空
+  - **PRIMARY_SERVERS 修正** — 移除 5 台不可靠服务器，补入 5 台验证可用服务器=
     - 补入: 国信1/华林7/杭州电信J2/J1/J4
     - 已验证全部 10 台 PRIMARY 服务器 K 线/行情/逐笔数据正常
   - **心跳失败自动重连** — 心跳检测到断线后立即尝试连接替代服务器
@@ -39,10 +30,6 @@
   - **重连跳过失败服务器** — `reconnect_if_needed` 不再重复尝试已确认失败的服务器
   - **`last_server` 线程安全** — 改为 `Arc<Mutex<>>`，心跳线程可同步更新服务器信息
 
-### 文档
-- **复权算法文档** — 新增 `docs/dev/AFTERHOURS_TRADING_PLAN.md` 盘后交易支持方案
-- **服务器探测缓存设计** — 新增 `docs/dev/SERVER_PROBE_CACHE_DESIGN.md`（方案 D，待实施）
-- **WORK_LOG 更新** — 记录连接管理优化和协议验证结论
 
 ## v0.6.5 (2026-07-02) — 逐笔成交精度修正 + CLI 增强 + 板块模块扩展
 
