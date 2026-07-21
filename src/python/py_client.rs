@@ -116,6 +116,39 @@ impl PyTdxHqClient {
         self.client.reorder_servers(&refs);
     }
 
+    /// 将服务器加入黑名单
+    ///
+    /// 黑名单中的服务器在 connect_to_any 和自动重试中被跳过。
+    /// 适用于已知某台服务器在当前网络环境下不可用的情况。
+    ///
+    /// # 示例
+    ///
+    /// ```python
+    /// client = TdxHqClient()
+    /// client.block_server("183.60.224.177", 7709)  # 屏蔽广发13
+    /// client.connect_to_any()  # 自动跳过黑名单服务器
+    /// ```
+    fn block_server(&self, ip: &str, port: u16) {
+        self.client.block_server(ip, port);
+    }
+
+    /// 从黑名单移除服务器
+    fn unblock_server(&self, ip: &str, port: u16) {
+        self.client.unblock_server(ip, port);
+    }
+
+    /// 获取黑名单列表
+    ///
+    /// 返回: list of (ip, port) tuples
+    fn blocked_servers(&self) -> Vec<(String, u16)> {
+        self.client.blocked_servers()
+    }
+
+    /// 清空黑名单
+    fn clear_blocked_servers(&self) {
+        self.client.clear_blocked_servers();
+    }
+
     /// 探测全部已知服务器, 返回按 API 响应时间排序的结果
     ///
     /// 返回: list of (name, ip, port, tcp_ms, hs_ms, api_ms)
@@ -769,5 +802,129 @@ impl PyTdxHqClient {
             infos.push((info,));
         }
         crate::python::py_dataframe::finance_to_df(py, &infos)
+    }
+
+    // ============================================================
+    // 复权配置
+    // ============================================================
+
+    /// 设置复权上下文数据量档位
+    ///
+    /// 控制复权计算时拉取的历史 K 线数量:
+    /// - `"low"`: 约 10 年 (2400 根, 3 页)
+    /// - `"mid"`: 约 20 年 (4800 根, 6 页, 默认)
+    /// - `"high"`: 约 30 年 (7200 根, 9 页)
+    ///
+    /// 对于上市时间较长的股票 (如长江电力 600900)，建议使用 `"high"` 档位
+    /// 以确保所有除权除息事件都被正确计算。
+    ///
+    /// Args:
+    ///     tier: 档位字符串, 可选 "low" / "mid" / "high"
+    ///
+    /// Example:
+    ///     >>> client = TdxHqClient()
+    ///     >>> client.connect_to_any()
+    ///     >>> client.set_fq_context_tier("high")  # 长历史股票使用 high 档
+    ///     >>> bars = client.get_security_bars(KLINE_DAILY, MARKET_SH, "600900", 0, 100)
+    fn set_fq_context_tier(&self, tier: &str) -> PyResult<()> {
+        use crate::net::utils::FqContextTier;
+        let t = match tier.to_lowercase().as_str() {
+            "low" => FqContextTier::Low,
+            "mid" => FqContextTier::Mid,
+            "high" => FqContextTier::High,
+            _ => return Err(pyo3::exceptions::PyValueError::new_err(
+                format!("Invalid tier '{}'. Use 'low', 'mid', or 'high'.", tier)
+            )),
+        };
+        self.client.set_fq_context_tier(t);
+        Ok(())
+    }
+
+    /// 获取当前复权上下文档位
+    ///
+    /// Returns:
+    ///     str: 当前档位 ("low" / "mid" / "high")
+    fn fq_context_tier(&self) -> &'static str {
+        use crate::net::utils::FqContextTier;
+        match self.client.fq_context_tier() {
+            FqContextTier::Low => "low",
+            FqContextTier::Mid => "mid",
+            FqContextTier::High => "high",
+        }
+    }
+
+    /// 计算复权因子 (不修改 K 线数据)
+    ///
+    /// 根据 XDXR 历史和上下文 K 线数据，计算并返回每个除权事件的复权因子。
+    /// 可用于验证复权精度、导出因子表、与其他平台数据对比。
+    ///
+    /// Args:
+    ///     market: 市场代码 (0=深圳, 1=上海, 2=北京)
+    ///     code: 股票代码 (如 "600519")
+    ///     start: 起始位置 (默认 0)
+    ///     count: 请求数量 (默认 800)
+    ///
+    /// Returns:
+    ///     dict: 包含以下字段:
+    ///         - factors: list of dict, 每个除权事件的因子详情
+    ///         - cumulative_qfq: float, 累计前复权因子
+    ///         - cumulative_hfq: float, 累计后复权因子
+    ///
+    /// Example:
+    ///     >>> client = TdxHqClient()
+    ///     >>> client.connect_to_any()
+    ///     >>> result = client.calc_fq_factors(MARKET_SH, "600900")
+    ///     >>> print(f"Cumulative QFQ: {result['cumulative_qfq']:.6f}")
+    ///     >>> for f in result['factors']:
+    ///     ...     print(f"{f['date']}: factor={f['qfq_factor']:.6f}")
+    #[pyo3(signature = (market, code, start=0, count=800))]
+    fn calc_fq_factors(
+        &self,
+        py: Python<'_>,
+        market: u8,
+        code: &str,
+        start: u32,
+        count: u16,
+    ) -> PyResult<Py<PyAny>> {
+        // 1. 获取 K 线数据 (未复权)
+        let bars = self.client
+            .get_security_bars(4, market, code, start, count, 0)  // category=4 (日K), fq=0 (未复权)
+            .map_err(to_py_err)?;
+
+        // 2. 获取 XDXR 数据
+        let xdxr = self.client
+            .get_xdxr_info(market, code)
+            .map_err(to_py_err)?;
+
+        // 3. 获取上下文数据 (自动检测档位)
+        use crate::protocol::fq_service::FqService;
+        let context = self.client.fetch_context_for_factors(4, market, code, &bars, &xdxr)
+            .map_err(to_py_err)?;
+
+        // 4. 计算因子
+        let result = FqService::calc_factors(&xdxr, &bars, &context);
+
+        // 5. 转换为 Python dict
+        let dict = PyDict::new(py);
+
+        // factors 列表
+        let factors_list = PyList::empty(py);
+        for f in &result.factors {
+            let f_dict = PyDict::new(py);
+            f_dict.set_item("date", f.date)?;
+            f_dict.set_item("close_before", f.close_before)?;
+            f_dict.set_item("qfq_factor", f.qfq_factor)?;
+            f_dict.set_item("hfq_factor", f.hfq_factor)?;
+            f_dict.set_item("div_per_share", f.div_per_share)?;
+            f_dict.set_item("bonus_ratio", f.bonus_ratio)?;
+            f_dict.set_item("rights_ratio", f.rights_ratio)?;
+            f_dict.set_item("rights_price", f.rights_price)?;
+            factors_list.append(f_dict)?;
+        }
+        dict.set_item("factors", factors_list)?;
+        dict.set_item("cumulative_qfq", result.cumulative_qfq)?;
+        dict.set_item("cumulative_hfq", result.cumulative_hfq)?;
+
+        Ok(dict.into())
     }
 }

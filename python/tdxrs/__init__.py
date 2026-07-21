@@ -2,24 +2,24 @@
 
 核心模块:
 - Reader: 日线、分钟线、板块、财务数据解析
-- Client: 行情客户端 (TdxHqClient, AsyncTdxHqClient, TdxDirectClient, TdxHqFundClient, TdxBlockClient)
+- Client: 行情客户端 (TdxHqClient, AsyncTdxHqClient, TdxDirectClient, TdxSmartClient, TdxHqFundClient, TdxBlockClient)
 
 用法:
-    from tdxrs import TdxHqClient, AsyncTdxHqClient, DailyBarReader
+    from tdxrs import TdxHqClient, TdxSmartClient, DailyBarReader
 """
 
 try:
     from tdxrs._internal import (
         DailyBarReader, MinBarReader, LcMinBarReader, BlockReader, FinancialReader,
-        TdxHqClient, AsyncTdxHqClient, TdxDirectClient, TdxHqFundClient, TdxBlockClient,
+        TdxHqClient, AsyncTdxHqClient, TdxDirectClient, TdxSmartClient, TdxHqFundClient, TdxBlockClient,
     )
 except ImportError:
     raise ImportError(
         "tdxrs native module not found. Please install with: pip install tdxrs"
     )
 
-__version__ = "0.6.6"
+__version__ = "0.6.7"
 __all__ = [
     "DailyBarReader", "MinBarReader", "LcMinBarReader", "BlockReader", "FinancialReader",
-    "TdxHqClient", "AsyncTdxHqClient", "TdxDirectClient", "TdxHqFundClient", "TdxBlockClient",
+    "TdxHqClient", "AsyncTdxHqClient", "TdxDirectClient", "TdxSmartClient", "TdxHqFundClient", "TdxBlockClient",
 ]

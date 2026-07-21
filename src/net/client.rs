@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -15,7 +15,7 @@ use crate::net::utils::{self, RateLimiter};
 use crate::protocol::constants::*;
 use crate::protocol::parsers::*;
 use crate::protocol::types::*;
-use crate::{logi, logw, loge};
+use crate::{logd, logi, logw, loge};
 
 /// 缓存条目
 struct CacheEntry<T> {
@@ -37,19 +37,25 @@ pub struct TdxHqClient {
     connect_timeout: Mutex<f64>,
     /// 用户自定义优先服务器列表 (为空时使用 PRIMARY_SERVERS)
     server_list: Mutex<Vec<(String, String, u16)>>,
+    /// 黑名单服务器列表 (IP, 端口)
+    blocked_servers: Mutex<Vec<(String, u16)>>,
     /// 速率限制器: 默认 (50 req/s)
     rate_limiter: RateLimiter,
     /// 速率限制器: 日K 级别 (15 req/s)
     rate_limiter_daily: RateLimiter,
     /// 速率限制器: 分时级别 (10 req/s, 不允许解禁)
     rate_limiter_minute: RateLimiter,
-    /// 复权上下文数据量档位 (默认 Mid ≈ 20 年)
-    fq_context_tier: utils::FqContextTier,
+    /// 复权上下文数据量档位 (默认 Mid ≈ 20 年), 以 u8 存储
+    fq_context_tier: AtomicU8,
 }
 
 impl TdxHqClient {
     pub fn new() -> Self {
-        let config = PoolConfig::default();
+        let mut config = PoolConfig::default();
+        // 设置握手回调，让连接池自动为新连接执行握手
+        config.handshake_fn = Some(Box::new(|conn: &mut TcpConnection| -> Result<()> {
+            utils::perform_handshake(conn)
+        }));
         let default_server = (
             PRIMARY_SERVERS[0].1.to_string(),
             PRIMARY_SERVERS[0].2,
@@ -66,10 +72,11 @@ impl TdxHqClient {
             cache_ttl: Mutex::new(Duration::from_secs(30)),
             connect_timeout: Mutex::new(CONNECT_TIMEOUT),
             server_list: Mutex::new(Vec::new()),
+            blocked_servers: Mutex::new(Vec::new()),
             rate_limiter: RateLimiter::new(20),      // 默认 50 req/s
             rate_limiter_daily: RateLimiter::new(67), // 日K 15 req/s
             rate_limiter_minute: RateLimiter::new(100), // 分时 10 req/s (不允许解禁)
-            fq_context_tier: utils::FqContextTier::default(),
+            fq_context_tier: AtomicU8::new(utils::FqContextTier::default() as u8),
         }
     }
 
@@ -91,12 +98,39 @@ impl TdxHqClient {
 
     /// 连接到任意可用服务器
     ///
-    /// 遍历顺序: 用户自定义列表 → PRIMARY_SERVERS → ALL_KNOWN_SERVERS
+    /// 遍历顺序: 上次成功服务器 → 用户自定义列表 → PRIMARY_SERVERS → ALL_KNOWN_SERVERS
+    /// 黑名单中的服务器会被自动跳过 (v0.6.7)。
+    ///
+    /// ## 优化 (v0.6.7)
+    ///
+    /// - 优先尝试上次成功连接的服务器，避免每次都从头遍历
+    /// - 已连接时直接返回，不重复连接
     pub fn connect_to_any(&self, timeout: Option<f64>) -> Result<bool> {
+        // 0) 已连接时直接返回
+        if self.connected.load(Ordering::SeqCst) {
+            return Ok(true);
+        }
+
+        // 0.5) 优先尝试上次成功的服务器
+        {
+            let last = self.last_server.lock().unwrap();
+            if let Some((ref ip, port)) = *last {
+                if !self.is_server_blocked(ip, port) {
+                    match self.connect_internal(ip, port, timeout, false) {
+                        Ok(true) => return Ok(true),
+                        _ => {}
+                    }
+                }
+            }
+        }
+
         // 1) 用户自定义列表
         {
             let list = self.server_list.lock().unwrap();
             for (_, ip, port) in list.iter() {
+                if self.is_server_blocked(ip, *port) {
+                    continue;
+                }
                 match self.connect_internal(ip, *port, timeout, false) {
                     Ok(true) => return Ok(true),
                     _ => continue,
@@ -106,6 +140,9 @@ impl TdxHqClient {
 
         // 2) PRIMARY_SERVERS (10台)
         for &(_, ip, port) in PRIMARY_SERVERS {
+            if self.is_server_blocked(ip, port) {
+                continue;
+            }
             match self.connect_internal(ip, port, timeout, false) {
                 Ok(true) => return Ok(true),
                 _ => continue,
@@ -114,6 +151,9 @@ impl TdxHqClient {
 
         // 3) ALL_KNOWN_SERVERS (101台, 兜底)
         for &(_, ip, port) in ALL_KNOWN_SERVERS {
+            if self.is_server_blocked(ip, port) {
+                continue;
+            }
             match self.connect_internal(ip, port, timeout, false) {
                 Ok(true) => return Ok(true),
                 _ => continue,
@@ -154,6 +194,54 @@ impl TdxHqClient {
         for &(name, ip, port) in sorted {
             list.push((name.to_string(), ip.to_string(), port));
         }
+    }
+
+    // ================================================================
+    // 黑名单管理 (v0.6.7)
+    // ================================================================
+
+    /// 将服务器加入黑名单
+    ///
+    /// 黑名单中的服务器在 `connect_to_any` 和 `reconnect_to_another_server` 中被跳过。
+    /// 适用于用户已知某台服务器在当前网络环境下不可用的情况。
+    ///
+    /// # 示例
+    ///
+    /// ```ignore
+    /// let client = TdxHqClient::new();
+    /// client.block_server("183.60.224.177", 7709);  // 屏蔽广发13
+    /// client.connect_to_any(None)?;  // 自动跳过黑名单服务器
+    /// ```
+    pub fn block_server(&self, ip: &str, port: u16) {
+        let mut blocked = self.blocked_servers.lock().unwrap();
+        if !blocked.iter().any(|(i, p)| i == ip && *p == port) {
+            blocked.push((ip.to_string(), port));
+            logi!("hq", "server {}:{} added to blacklist", ip, port);
+        }
+    }
+
+    /// 从黑名单移除服务器
+    pub fn unblock_server(&self, ip: &str, port: u16) {
+        let mut blocked = self.blocked_servers.lock().unwrap();
+        blocked.retain(|(i, p)| i != ip || *p != port);
+        logi!("hq", "server {}:{} removed from blacklist", ip, port);
+    }
+
+    /// 获取黑名单列表
+    pub fn blocked_servers(&self) -> Vec<(String, u16)> {
+        self.blocked_servers.lock().unwrap().clone()
+    }
+
+    /// 清空黑名单
+    pub fn clear_blocked_servers(&self) {
+        self.blocked_servers.lock().unwrap().clear();
+        logi!("hq", "server blacklist cleared");
+    }
+
+    /// 检查服务器是否在黑名单中
+    fn is_server_blocked(&self, ip: &str, port: u16) -> bool {
+        let blocked = self.blocked_servers.lock().unwrap();
+        blocked.iter().any(|(i, p)| i == ip && *p == port)
     }
 
     /// 探测所有已知服务器, 返回按 API 响应时间升序排列的结果
@@ -240,21 +328,15 @@ impl TdxHqClient {
         // 建立连接并执行握手
         let mut tcp = TcpConnection::connect(ip, port, timeout_secs)?;
         utils::perform_handshake(&mut tcp)?;
-        // 握手成功，将连接放入池中
-        let server = (ip.to_string(), port);
-        let mut config = PoolConfig {
-            max_size: DEFAULT_POOL_SIZE,
-            connect_timeout: timeout_secs,
-            handshake_fn: None,
-        };
-        // 设置握手回调，让新连接也能自动握手
-        config.handshake_fn = Some(Box::new(|conn: &mut TcpConnection| -> Result<()> {
-            utils::perform_handshake(conn)
-        }));
-        let pool = Arc::new(ConnectionPool::new_single(server.clone(), config));
-        pool.push(tcp, server.clone());
 
-        *self.pool.lock().unwrap() = pool;
+        // 握手成功，复用现有连接池 (保持心跳线程引用有效)
+        let server = (ip.to_string(), port);
+        {
+            let pool_guard = self.pool.lock().unwrap();
+            pool_guard.close_all();  // 关闭旧连接
+            pool_guard.push(tcp, server.clone());  // 放入新连接
+        }
+
         self.connected.store(true, Ordering::SeqCst);
         *self.last_server.lock().unwrap() = Some(server);
 
@@ -591,6 +673,12 @@ impl TdxHqClient {
     ///
     /// `fq`: 复权类型, 0=未复权 1=前复权(默认) 2=后复权
     /// (v0.4.1: fq>0 时自动获取除权信息并客户端侧计算复权)
+    ///
+    /// ## 空响应自动重试 (v0.6.7)
+    ///
+    /// 当请求日K线 (category >= 4) 返回空数据时，自动尝试切换服务器重试。
+    /// 这解决了部分服务器 (如海通、广发) 握手正常但 K 线返回空的问题。
+    /// 最多重试 2 次 (共 3 次请求)，确保单台服务器故障不影响数据获取。
     pub fn get_security_bars(
         &self,
         category: u8,
@@ -601,12 +689,44 @@ impl TdxHqClient {
         fq: u8,
     ) -> Result<Vec<SecurityBar>> {
         self.check_not_block_code(code)?;
-        let packet = utils::build_security_bars_packet(category, market, code, start, count, fq);
-        let body = self.send_and_recv_limited(&packet, &self.rate_limiter_daily)?;
-        let mut bars = parse_security_bars(&body, category)?;
+
+        // 日K线空响应自动重试 (仅对日K及以上周期，分钟线不重试)
+        let should_retry_empty = category >= 4;
+        let max_retry = if should_retry_empty { 3 } else { 1 };
+
+        let mut bars = Vec::new();
+        let mut retry_count = 0;
+
+        for attempt in 0..max_retry {
+            let packet = utils::build_security_bars_packet(category, market, code, start, count, fq);
+            let body = self.send_and_recv_limited(&packet, &self.rate_limiter_daily)?;
+            let parsed = parse_security_bars(&body, category)?;
+
+            if !parsed.is_empty() || !should_retry_empty {
+                bars = parsed;
+                break;
+            }
+
+            // 空响应，尝试切换服务器 (debug 级别，减少噪音)
+            retry_count += 1;
+            logd!("hq", "attempt {}/{}: empty K-line for {}, switching server",
+                  attempt + 1, max_retry, code);
+
+            if attempt < max_retry - 1 {
+                self.reconnect_to_another_server();
+            }
+        }
+
+        // 仅在所有重试都失败时输出警告
+        if bars.is_empty() && should_retry_empty && retry_count > 0 {
+            logw!("hq", "all {} attempts returned empty K-line for {}", max_retry, code);
+        } else if retry_count > 0 && !bars.is_empty() {
+            // 重试成功，输出信息级别
+            logi!("hq", "got {} bars for {} after {} server switch(es)", bars.len(), code, retry_count);
+        }
 
         // 客户端侧复权计算 (v0.4.2)
-        if fq != 0 {
+        if fq != 0 && !bars.is_empty() {
             if let Ok(xdxr) = self.get_xdxr_info(market, code) {
                 use crate::protocol::adjuster::{adjust_security_bars, FqType};
                 let fq_enum = match fq {
@@ -619,6 +739,34 @@ impl TdxHqClient {
         }
 
         Ok(bars)
+    }
+
+    /// 尝试切换到另一台服务器
+    ///
+    /// 遍历 PRIMARY_SERVERS，跳过当前服务器和黑名单，连接到第一台可用的。
+    fn reconnect_to_another_server(&self) {
+        let current = self.last_server.lock().unwrap().clone();
+
+        for &(_, ip, port) in PRIMARY_SERVERS {
+            // 跳过当前服务器
+            if let Some((ref cur_ip, cur_port)) = current {
+                if ip == cur_ip && port == cur_port {
+                    continue;
+                }
+            }
+
+            // 跳过黑名单服务器
+            if self.is_server_blocked(ip, port) {
+                continue;
+            }
+
+            if self.connect_internal(ip, port, Some(CONNECT_TIMEOUT), false).is_ok() {
+                logi!("hq", "switched to server {}:{}", ip, port);
+                return;
+            }
+        }
+
+        logw!("hq", "no alternative server available");
     }
 
     /// 为复权计算获取额外的历史 K 线上下文
@@ -637,7 +785,7 @@ impl TdxHqClient {
         utils::fetch_context_bars_for_adjust_with_tier(
             |pkt| self.send_and_recv(pkt),
             category, market, code, bars, xdxr,
-            self.fq_context_tier,
+            self.fq_context_tier(),
         )
     }
 
@@ -647,13 +795,23 @@ impl TdxHqClient {
     /// - `Low`: 约 10 年 (2400 根)
     /// - `Mid`: 约 20 年 (4800 根, 默认)
     /// - `High`: 约 30 年 (7200 根)
-    pub fn set_fq_context_tier(&mut self, tier: utils::FqContextTier) {
-        self.fq_context_tier = tier;
+    pub fn set_fq_context_tier(&self, tier: utils::FqContextTier) {
+        let val: u8 = match tier {
+            utils::FqContextTier::Low => 0,
+            utils::FqContextTier::Mid => 1,
+            utils::FqContextTier::High => 2,
+        };
+        self.fq_context_tier.store(val, Ordering::SeqCst);
     }
 
     /// 获取当前复权上下文档位
     pub fn fq_context_tier(&self) -> utils::FqContextTier {
-        self.fq_context_tier
+        let val = self.fq_context_tier.load(Ordering::SeqCst);
+        match val {
+            0 => utils::FqContextTier::Low,
+            2 => utils::FqContextTier::High,
+            _ => utils::FqContextTier::Mid,
+        }
     }
 
     /// 获取复权因子计算所需的上下文数据 (追溯到上市)
@@ -784,9 +942,40 @@ impl TdxHqClient {
     ) -> Result<Vec<IndexBar>> {
         self.check_not_block_code(code)?;
         let _ = fq; // 指数不复权，强制 fq=0 发送
-        let packet = utils::build_index_bars_packet(category, market, code, start, count, 0);
-        let body = self.send_and_recv_limited(&packet, &self.rate_limiter_daily)?;
-        parse_index_bars(&body, category)
+
+        // 日K线空响应自动重试 (与 get_security_bars 一致)
+        let should_retry_empty = category >= 4;
+        let max_retry = if should_retry_empty { 3 } else { 1 };
+
+        let mut bars = Vec::new();
+        let mut retry_count = 0;
+
+        for attempt in 0..max_retry {
+            let packet = utils::build_index_bars_packet(category, market, code, start, count, 0);
+            let body = self.send_and_recv_limited(&packet, &self.rate_limiter_daily)?;
+            let parsed = parse_index_bars(&body, category)?;
+
+            if !parsed.is_empty() || !should_retry_empty {
+                bars = parsed;
+                break;
+            }
+
+            retry_count += 1;
+            logd!("hq", "attempt {}/{}: empty index K-line for {}, switching server",
+                  attempt + 1, max_retry, code);
+
+            if attempt < max_retry - 1 {
+                self.reconnect_to_another_server();
+            }
+        }
+
+        if bars.is_empty() && should_retry_empty && retry_count > 0 {
+            logw!("hq", "all {} attempts returned empty index K-line for {}", max_retry, code);
+        } else if retry_count > 0 && !bars.is_empty() {
+            logi!("hq", "got {} index bars for {} after {} server switch(es)", bars.len(), code, retry_count);
+        }
+
+        Ok(bars)
     }
 
     /// 获取指数K线 (自动分页)

@@ -6,3 +6,4 @@ pub mod py_direct_client;
 pub mod py_fund;
 pub mod py_profile;
 pub mod py_reader;
+pub mod py_smart_client;

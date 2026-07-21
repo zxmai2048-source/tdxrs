@@ -17,7 +17,7 @@
 //! ```
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc};
 use std::time::{Duration, Instant};
 
@@ -238,8 +238,8 @@ pub struct AsyncTdxHqClient {
     heartbeat_stop: tokio::sync::Mutex<Option<oneshot::Sender<()>>>,
     /// 连接是否存活 (心跳检测)
     connected: Arc<std::sync::atomic::AtomicBool>,
-    /// 复权上下文数据量档位 (默认 Mid ≈ 20 年)
-    fq_context_tier: utils::FqContextTier,
+    /// 复权上下文数据量档位 (默认 Mid ≈ 20 年), 以 u8 存储
+    fq_context_tier: AtomicU8,
 }
 
 impl AsyncTdxHqClient {
@@ -259,7 +259,7 @@ impl AsyncTdxHqClient {
             pool_size: pool_size.max(1),
             heartbeat_stop: tokio::sync::Mutex::new(None),
             connected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            fq_context_tier: utils::FqContextTier::default(),
+            fq_context_tier: AtomicU8::new(utils::FqContextTier::default() as u8),
         }
     }
 
@@ -514,7 +514,7 @@ impl AsyncTdxHqClient {
         }
 
         let max_per_page = MAX_KLINE_COUNT as u32;
-        let max_pages = self.fq_context_tier.pages();
+        let max_pages = self.fq_context_tier().pages();
         let mut context = Vec::new();
         let mut offset = max_per_page;
 
@@ -554,13 +554,23 @@ impl AsyncTdxHqClient {
     }
 
     /// 设置复权上下文数据量档位
-    pub fn set_fq_context_tier(&mut self, tier: utils::FqContextTier) {
-        self.fq_context_tier = tier;
+    pub fn set_fq_context_tier(&self, tier: utils::FqContextTier) {
+        let val: u8 = match tier {
+            utils::FqContextTier::Low => 0,
+            utils::FqContextTier::Mid => 1,
+            utils::FqContextTier::High => 2,
+        };
+        self.fq_context_tier.store(val, Ordering::SeqCst);
     }
 
     /// 获取当前复权上下文档位
     pub fn fq_context_tier(&self) -> utils::FqContextTier {
-        self.fq_context_tier
+        let val = self.fq_context_tier.load(Ordering::SeqCst);
+        match val {
+            0 => utils::FqContextTier::Low,
+            2 => utils::FqContextTier::High,
+            _ => utils::FqContextTier::Mid,
+        }
     }
 
     // ================================================================

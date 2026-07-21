@@ -2,6 +2,8 @@
 //!
 //! 适用场景：偶发请求，不需要维护长连接
 
+use std::sync::atomic::{AtomicU8, Ordering};
+
 use crate::error::{Result, TdxError};
 use crate::error_codes::ErrorCode;
 use crate::net::connection::TcpConnection;
@@ -20,8 +22,8 @@ pub struct TdxDirectClient {
     ip: String,
     port: u16,
     timeout: f64,
-    /// 复权上下文数据量档位 (默认 Mid ≈ 20 年)
-    fq_context_tier: utils::FqContextTier,
+    /// 复权上下文数据量档位 (默认 Mid ≈ 20 年), 以 u8 存储
+    fq_context_tier: AtomicU8,
 }
 
 impl TdxDirectClient {
@@ -30,7 +32,7 @@ impl TdxDirectClient {
             ip: ip.to_string(),
             port,
             timeout,
-            fq_context_tier: utils::FqContextTier::default(),
+            fq_context_tier: AtomicU8::new(utils::FqContextTier::default() as u8),
         }
     }
 
@@ -103,18 +105,28 @@ impl TdxDirectClient {
         utils::fetch_context_bars_for_adjust_with_tier(
             |pkt| self.send_and_recv(pkt),
             category, market, code, bars, xdxr,
-            self.fq_context_tier,
+            self.fq_context_tier(),
         )
     }
 
     /// 设置复权上下文数据量档位
-    pub fn set_fq_context_tier(&mut self, tier: utils::FqContextTier) {
-        self.fq_context_tier = tier;
+    pub fn set_fq_context_tier(&self, tier: utils::FqContextTier) {
+        let val: u8 = match tier {
+            utils::FqContextTier::Low => 0,
+            utils::FqContextTier::Mid => 1,
+            utils::FqContextTier::High => 2,
+        };
+        self.fq_context_tier.store(val, Ordering::SeqCst);
     }
 
     /// 获取当前复权上下文档位
     pub fn fq_context_tier(&self) -> utils::FqContextTier {
-        self.fq_context_tier
+        let val = self.fq_context_tier.load(Ordering::SeqCst);
+        match val {
+            0 => utils::FqContextTier::Low,
+            2 => utils::FqContextTier::High,
+            _ => utils::FqContextTier::Mid,
+        }
     }
 
     /// 获取复权因子计算所需的上下文数据 (追溯到上市)

@@ -6,4 +6,5 @@ pub mod f10_client;
 pub mod finance_client;
 pub mod packet;
 pub mod pool;
+pub mod smart_client;
 pub mod utils;

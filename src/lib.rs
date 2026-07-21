@@ -18,6 +18,9 @@ use pyo3::prelude::*;
 /// 提供高性能的 TDX 二进制数据解析，支持 Python 调用。
 #[pymodule(name = "_internal")]
 fn tdxrs(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    // 初始化日志系统 (读取 TDXRS_LOG 环境变量)
+    logging::init();
+
     // Reader classes
     m.add_class::<python::py_reader::DailyBarReader>()?;
     m.add_class::<python::py_reader::MinBarReader>()?;
@@ -28,6 +31,7 @@ fn tdxrs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<python::py_client::PyTdxHqClient>()?;
     m.add_class::<python::py_direct_client::PyTdxDirectClient>()?;
     m.add_class::<python::py_async_client::PyAsyncTdxHqClient>()?;
+    m.add_class::<python::py_smart_client::PyTdxSmartClient>()?;
     // Fund client
     m.add_class::<python::py_fund::PyTdxHqFundClient>()?;
     // Block client
