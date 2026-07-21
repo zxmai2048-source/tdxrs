@@ -1,5 +1,44 @@
 # 变更日志
 
+## v0.6.7 (2026-07-21) — 日K空响应自动重试 + SmartClient + 服务器黑名单
+
+### 新增
+- **`TdxSmartClient` 智能连接客户端** — 分层健康检查 + 本地缓存
+  - 快速初始连接: 仅验证 TCP + 握手，不做 K 线健康检查
+  - 惰性健康检查: 首次 K 线请求返回空时触发，自动切换服务器
+  - 本地缓存: `~/.tdxrs/server_cache.json` 记录成功/失败服务器
+  - 黑名单机制: 连续失败的服务器自动加入黑名单 (24h 过期)
+  - Python 绑定：`client = tdxrs.TdxSmartClient()`
+- **`TdxHqClient` 服务器黑名单** — 用户可手动屏蔽特定服务器
+  - `block_server(ip, port)` — 将服务器加入黑名单
+  - `unblock_server(ip, port)` — 从黑名单移除
+  - `blocked_servers()` — 获取黑名单列表
+  - `clear_blocked_servers()` — 清空黑名单
+  - 黑名单在 `connect_to_any` 和自动重试中生效
+  - 适用场景: 用户已知某台服务器在当前网络环境下不可用
+
+### 优化
+- **日K空响应自动重试** — 单台服务器故障不影响数据获取
+  - `get_security_bars` 和 `get_index_bars` (category >= 4) 返回空数据时，自动切换服务器重试
+  - 最多重试 2 次 (共 3 次请求)，遍历 PRIMARY_SERVERS
+  - 解决部分服务器 (如海通、广发) 握手正常但 K 线返回空的问题
+  - 分钟线 (category < 4) 不重试，避免不必要的开销
+- **日志级别优化** — 减少重试日志噪音
+  - 单次重试尝试: `debug` 级别 (仅 `TDXRS_LOG=debug` 时显示)
+  - 重试成功摘要: `info` 级别 (如 `got 5 bars for 600519 after 2 server switch(es)`)
+  - 全部重试失败: `warn` 级别 (如 `all 3 attempts returned empty K-line for 600519`)
+  - 默认模式 (`TDXRS_LOG=warn`) 下不会显示重试消息
+- **连接池复用修复** — 修复心跳线程引用失效问题
+  - `connect_internal` 不再创建新连接池，改为复用现有池 (关闭旧连接 + 推入新连接)
+  - 解决: 心跳线程持有旧池引用 → 检测失败 → 错误标记 `connected=false`
+  - 效果: 消除 `request failed, retry 1/4` 警告，查询耗时降低约 55%
+- **`connect_to_any` 优化** — 避免重复连接
+  - 已连接时直接返回 (< 1ms)，不再遍历服务器列表
+  - 优先尝试上次成功的服务器 (`last_server`)
+- **`TDXRS_LOG` 环境变量修复** — 现在正确读取并生效
+  - `logging::init()` 在模块初始化时调用
+  - 支持: `off` / `error` / `warn` / `info` / `debug`
+
 ## v0.6.6 (2026-07-06) — 复权因子接口 + 连接管理优化
 
 ### 新增
@@ -15,14 +54,21 @@
 - **`FqContextTier` 复权上下文档位配置** — 支持三档配置
   - `Low`: 约 10 年 (2400 根) `Mid`: 约 20 年 (4800 根，默认) `High`: 约 30 年 (7200 根)
   - 客户端方法：`set_fq_context_tier()` / `fq_context_tier()`
+- **`TdxSmartClient` 智能连接客户端** — 分层健康检查 + 本地缓存 (2026-07-21)
+  - 快速初始连接: 仅验证 TCP + 握手，不做 K 线健康检查
+  - 惰性健康检查: 首次 K 线请求返回空时触发，自动切换服务器
+  - 本地缓存: 记录成功/失败服务器，下次连接优先使用缓存
+  - 黑名单机制: 连续失败的服务器自动加入黑名单 (24h 过期)
+  - Python 绑定：`client = tdxrs.TdxSmartClient()`
 
 ### 优化
 - **复权上下文获取优化** — `fetch_context_bars_for_adjust` 支持可配置的翻页数
   - 新增 `fetch_context_bars_for_adjust_with_tier` 函数
   - 原有 `fetch_context_bars_for_adjust` 保持默认 Mid 档位
 - **连接管理优化** — 修复服务器选择和心跳重连问题
-  - **PRIMARY_SERVERS 修正** — 移除 5 台不可靠服务器，补入 5 台验证可用服务器=
-    - 补入: 国信1/华林7/杭州电信J2/J1/J4
+  - **PRIMARY_SERVERS 修正** — 移除不可靠服务器，补入验证可用服务器
+    - 2026-07-08: 移除华林4/海通8/海通3/海通2/海通4，补入国信1/华林7/杭州电信J2/J1/J4
+    - 2026-07-17: 移除广发1 (119.29.19.242)，补入杭州电信J4 (115.238.90.165)
     - 已验证全部 10 台 PRIMARY 服务器 K 线/行情/逐笔数据正常
   - **心跳失败自动重连** — 心跳检测到断线后立即尝试连接替代服务器
     - 旧逻辑: 仅标记 `connected=false`，等待下次请求才触发重连

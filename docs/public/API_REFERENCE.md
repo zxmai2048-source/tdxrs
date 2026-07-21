@@ -153,6 +153,64 @@ client.connect("119.147.212.81", 7709, timeout=5.0)
 | `reorder_servers(results)` | 按 `probe_servers()` 排序结果重排优先列表 |
 | `probe_servers(timeout=3.0)` → `list[(name, ip, port, tcp_ms, hs_ms, api_ms)]` | 探测全部已知服务器，返回延迟排序 |
 
+#### 服务器黑名单 (v0.6.7)
+
+| 方法 | 说明 |
+|------|------|
+| `block_server(ip, port)` | 将服务器加入黑名单，连接时自动跳过 |
+| `unblock_server(ip, port)` | 从黑名单移除服务器 |
+| `blocked_servers()` → `list[(ip, port)]` | 获取黑名单列表 |
+| `clear_blocked_servers()` | 清空黑名单 |
+
+```python
+client = TdxHqClient()
+
+# 屏蔽已知不可用的服务器
+client.block_server("183.60.224.177", 7709)  # 广发13
+client.block_server("202.96.138.90", 7709)   # 海通服务器
+
+# 连接时自动跳过黑名单服务器
+client.connect_to_any()
+
+# 查看黑名单
+print(client.blocked_servers())  # [('183.60.224.177', 7709), ('202.96.138.90', 7709)]
+
+# 清空黑名单
+client.clear_blocked_servers()
+```
+
+> **适用场景**: 用户已知某台服务器在当前网络环境下不可用时，可预先屏蔽，避免连接超时。
+
+#### 日K空响应自动重试 (v0.6.7)
+
+当 `get_security_bars` 或 `get_index_bars` 请求日K线 (category >= 4) 返回空数据时，自动切换服务器重试。
+
+| 行为 | 说明 |
+|------|------|
+| 触发条件 | category >= 4 (日K、周K、月K、季K、年K) 且返回空数据 |
+| 最大重试 | 3 次 (首次 + 2 次重试) |
+| 重试策略 | 遍历 PRIMARY_SERVERS，跳过当前服务器和黑名单 |
+| 分钟线 | 不重试 (category < 4)，避免不必要的开销 |
+
+**日志级别**:
+
+| 级别 | 环境变量 | 输出内容 |
+|------|----------|----------|
+| `warn` (默认) | 无 | 仅在全部重试失败时输出警告 |
+| `info` | `TDXRS_LOG=info` | 重试成功后输出摘要 (如 `got 5 bars for 600519 after 2 server switch(es)`) |
+| `debug` | `TDXRS_LOG=debug` | 每次重试尝试的详细信息 |
+
+```bash
+# 生产环境 (默认，无噪音)
+python your_script.py
+
+# 监控服务器健康
+TDXRS_LOG=info python your_script.py
+
+# 调试连接问题
+TDXRS_LOG=debug python your_script.py
+```
+
 #### 配置
 
 | 方法 | 说明 |
@@ -765,6 +823,84 @@ dc = TdxDirectClient("119.147.212.81", 7709, timeout=10.0)
 bars = dc.get_security_bars(KLINE_DAILY, MARKET_SH, "600519", 0, 100, FQ_QFQ)
 dc.set_server("180.153.18.17", 7709)  # 切换服务器
 ```
+
+---
+
+### TdxSmartClient (v0.6.7)
+
+智能连接客户端。包装 `TdxHqClient`，增加惰性健康检查和服务器缓存功能。
+
+```python
+from tdxrs import TdxSmartClient
+client = TdxSmartClient()
+```
+
+#### 核心特性
+
+| 特性 | 说明 |
+|------|------|
+| 快速初始连接 | 仅验证 TCP + 握手，不做 K 线健康检查 |
+| 惰性健康检查 | 首次 K 线请求返回空时触发，自动切换服务器 |
+| 本地缓存 | `~/.tdxrs/server_cache.json` 记录成功/失败服务器 |
+| 黑名单机制 | 连续失败的服务器自动加入黑名单 (24h 过期) |
+
+#### 方法
+
+| 方法 | 返回 | 说明 |
+|------|------|------|
+| `connect_to_any(timeout=None)` | `bool` | 连接到任意可用服务器 (优先使用缓存) |
+| `get_security_bars(...)` | `list[dict]` | 获取 K 线数据 (带自动重试) |
+| `get_security_quotes(...)` | `list[dict]` | 获取实时行情 (带自动重试) |
+| `cache_stats()` | `str` | 获取缓存统计信息 |
+| `clear_cache()` | — | 清除缓存 |
+| `probe_and_cache(timeout)` | `list` | 探测所有服务器并更新缓存 |
+| `disconnect()` | — | 断开连接 |
+| `is_connected()` | `bool` | 是否已连接 |
+
+#### 使用示例
+
+```python
+from tdxrs import TdxSmartClient
+
+# 创建智能客户端
+client = TdxSmartClient()
+
+# 连接 (自动使用缓存，跳过黑名单服务器)
+client.connect_to_any(timeout=10.0)
+
+# 获取 K 线数据 (如果返回空，自动切换服务器重试)
+bars = client.get_security_bars(4, 1, '600519', 0, 10, 0)
+
+# 查看缓存状态
+print(client.cache_stats())
+
+# 探测所有服务器并更新缓存 (类似 mootdx bestip)
+results = client.probe_and_cache(3.0)
+for ip, port, name, latency in results:
+    print(f"{name}: {latency}ms")
+
+# 清除缓存
+client.clear_cache()
+
+# 断开连接
+client.disconnect()
+```
+
+#### 与 TdxHqClient 对比
+
+| 维度 | TdxHqClient | TdxSmartClient |
+|------|-------------|----------------|
+| 初始连接 | 无健康检查 | 无健康检查 |
+| K 线请求 | 返回空时自动重试 (v0.6.7) | 返回空时自动重试 |
+| 服务器缓存 | 无 | 本地 JSON 缓存 |
+| 自动黑名单 | 无 | 24h 自动过期 |
+| 手动黑名单 | ✅ `block_server` | 无 |
+| 适用场景 | 通用 | 网络不稳定 |
+
+**适用场景**:
+- 网络环境不稳定，部分服务器对当前用户不可用
+- 长期运行，需要自动适应服务器状态变化
+- 需要快速初始化连接，首次 K 线请求可能需要重试
 
 ---
 

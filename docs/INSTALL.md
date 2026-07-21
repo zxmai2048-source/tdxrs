@@ -1,6 +1,6 @@
 # tdxrs 安装和使用说明
 
-> 版本: v0.6.6 | 更新: 2026-07-17
+> 版本: v0.6.7 | 更新: 2026-07-21
 
 ## 环境要求
 
@@ -672,12 +672,59 @@ client.pool_stats() -> PoolStats
 - 非交易时间无实时数据
 - **2026-07 起部分服务器协议异常** — 尝试更新 tdxrs 版本或指定服务器:
   ```python
-  # 方式 1: 更新 tdxrs (PRIMARY_SERVERS 会维护故障服务器)
+  # 方式 1: 更新 tdxrs (v0.6.7+ 日K空响应自动重试)
   pip install --upgrade tdxrs
 
-  # 方式 2: 指定已验证可用的服务器
-  client.connect("183.60.224.177", 7709)  # 广发13
+  # 方式 2: 使用黑名单屏蔽问题服务器
+  client = TdxHqClient()
+  client.block_server("183.60.224.177", 7709)  # 屏蔽广发13
+  client.connect_to_any()
+
+  # 方式 3: 使用智能客户端 (自动缓存+黑名单)
+  client = TdxSmartClient()
+  client.connect_to_any()
   ```
+
+### Q: 如何屏蔽特定服务器？
+
+v0.6.7 起支持服务器黑名单功能:
+
+```python
+from tdxrs import TdxHqClient
+
+client = TdxHqClient()
+
+# 屏蔽已知不可用的服务器
+client.block_server("183.60.224.177", 7709)  # 广发13
+client.block_server("202.96.138.90", 7709)   # 海通服务器
+
+# 连接时自动跳过黑名单服务器
+client.connect_to_any()
+
+# 查看黑名单
+print(client.blocked_servers())
+
+# 清空黑名单
+client.clear_blocked_servers()
+```
+
+**适用场景**: 用户已知某台服务器在当前网络环境下不可用时，可预先屏蔽，避免连接超时。
+
+### Q: TdxHqClient 和 TdxSmartClient 有什么区别？
+
+| 维度 | TdxHqClient | TdxSmartClient |
+|------|-------------|----------------|
+| 初始连接 | 无健康检查 | 无健康检查 |
+| 日K空响应 | 自动重试 (v0.6.7) | 自动重试 |
+| 服务器缓存 | 无 | 本地 JSON 缓存 |
+| 自动黑名单 | 无 | 24h 自动过期 |
+| 手动黑名单 | ✅ `block_server` | 无 |
+| 适用场景 | 通用 | 网络不稳定 |
+
+**建议**:
+- 大多数场景使用 `TdxHqClient` 即可
+- 网络环境不稳定时使用 `TdxSmartClient`
+- 已知特定服务器不可用时，使用 `TdxHqClient.block_server()`
 
 ### Q: 财务数据怎么解读单位？
 
@@ -705,6 +752,31 @@ pacman -S mingw-w64-ucrt-x86_64-binutils
 # 加入 PATH (管理员 PowerShell, ⚠️ 勿用 setx):
 [Environment]::SetEnvironmentVariable("PATH", $env:PATH + ";C:\msys64\ucrt64\bin", "User")
 ```
+
+### Q: 如何查看重试日志或减少日志噪音？
+
+v0.6.7 起支持通过 `TDXRS_LOG` 环境变量控制日志级别:
+
+```bash
+# 默认模式 (warn) — 仅显示警告和错误，无重试消息
+python your_script.py
+
+# 监控模式 (info) — 显示服务器切换摘要
+TDXRS_LOG=info python your_script.py
+# 输出示例: [I] hq  got 5 bars for 600519 after 2 server switch(es)
+
+# 调试模式 (debug) — 显示每次重试尝试的详细信息
+TDXRS_LOG=debug python your_script.py
+# 输出示例: [D] hq  attempt 1/3: empty K-line for 600519, switching server
+```
+
+| 级别 | 环境变量 | 输出内容 |
+|------|----------|----------|
+| `off` | `TDXRS_LOG=off` | 禁用所有日志 |
+| `error` | `TDXRS_LOG=error` | 仅错误 |
+| `warn` | `TDXRS_LOG=warn` | 警告和错误 (默认) |
+| `info` | `TDXRS_LOG=info` | 连接、切换、成功摘要 |
+| `debug` | `TDXRS_LOG=debug` | 每次重试尝试的详细信息 |
 
 ### Q: maturin develop 未生效
 
